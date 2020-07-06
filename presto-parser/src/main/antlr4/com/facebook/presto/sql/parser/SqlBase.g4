@@ -109,7 +109,8 @@ statement
     | SHOW ROLE GRANTS ((FROM | IN) identifier)?                       #showRoleGrants
     | DESCRIBE qualifiedName                                           #showColumns
     | DESC qualifiedName                                               #showColumns
-    | SHOW FUNCTIONS                                                   #showFunctions
+    | SHOW FUNCTIONS
+        (LIKE pattern=string (ESCAPE escape=string)?)?                 #showFunctions
     | SHOW SESSION                                                     #showSession
     | SET SESSION qualifiedName EQ expression                          #setSession
     | RESET SESSION qualifiedName                                      #resetSession
@@ -176,14 +177,20 @@ alterRoutineCharacteristic
 
 routineBody
     : returnStatement
+    | externalBodyReference
     ;
 
 returnStatement
     : RETURN expression
     ;
 
+externalBodyReference
+    : EXTERNAL (NAME externalRoutineName)?
+    ;
+
 language
     : SQL
+    | identifier
     ;
 
 determinism
@@ -195,6 +202,9 @@ nullCallClause
     | CALLED ON NULL INPUT
     ;
 
+externalRoutineName
+    : identifier
+    ;
 
 queryNoWith:
       queryTerm
@@ -540,7 +550,7 @@ nonReserved
     | BERNOULLI
     | CALL | CALLED | CASCADE | CATALOGS | COLUMN | COLUMNS | COMMENT | COMMIT | COMMITTED | CURRENT | CURRENT_ROLE
     | DATA | DATE | DAY | DESC | DETERMINISTIC | DISTRIBUTED
-    | EXCLUDING | EXPLAIN
+    | EXCLUDING | EXPLAIN | EXTERNAL
     | FILTER | FIRST | FOLLOWING | FORMAT | FUNCTION | FUNCTIONS
     | GRANT | GRANTED | GRANTS | GRAPHVIZ
     | HOUR
@@ -548,7 +558,7 @@ nonReserved
     | JSON
     | LANGUAGE | LAST | LATERAL | LEVEL | LIMIT | LOGICAL
     | MAP | MINUTE | MONTH
-    | NFC | NFD | NFKC | NFKD | NO | NONE | NULLIF | NULLS
+    | NAME | NFC | NFD | NFKC | NFKD | NO | NONE | NULLIF | NULLS
     | ONLY | OPTION | ORDINALITY | OUTPUT | OVER
     | PARTITION | PARTITIONS | POSITION | PRECEDING | PRIVILEGES | PROPERTIES
     | RANGE | READ | RENAME | REPEATABLE | REPLACE | RESET | RESPECT | RESTRICT | RETURN | RETURNS | REVOKE | ROLE | ROLES | ROLLBACK | ROW | ROWS
@@ -617,6 +627,7 @@ EXECUTE: 'EXECUTE';
 EXISTS: 'EXISTS';
 EXPLAIN: 'EXPLAIN';
 EXTRACT: 'EXTRACT';
+EXTERNAL: 'EXTERNAL';
 FALSE: 'FALSE';
 FILTER: 'FILTER';
 FIRST: 'FIRST';
@@ -663,6 +674,7 @@ LOGICAL: 'LOGICAL';
 MAP: 'MAP';
 MINUTE: 'MINUTE';
 MONTH: 'MONTH';
+NAME: 'NAME';
 NATURAL: 'NATURAL';
 NFC : 'NFC';
 NFD : 'NFD';

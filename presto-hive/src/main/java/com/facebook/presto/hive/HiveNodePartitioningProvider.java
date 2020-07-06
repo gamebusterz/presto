@@ -31,6 +31,8 @@ import java.util.function.ToIntFunction;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static com.facebook.presto.hive.HiveBucketFunction.createHiveCompatibleBucketFunction;
+import static com.facebook.presto.hive.HiveBucketFunction.createPrestoNativeBucketFunction;
 import static com.facebook.presto.hive.HiveSessionProperties.getNodeSelectionStrategy;
 import static com.facebook.presto.spi.StandardErrorCode.NODE_SELECTION_NOT_SUPPORTED;
 import static com.facebook.presto.spi.connector.ConnectorBucketNodeMap.createBucketNodeMap;
@@ -49,8 +51,15 @@ public class HiveNodePartitioningProvider
             int bucketCount)
     {
         HivePartitioningHandle handle = (HivePartitioningHandle) partitioningHandle;
-        List<HiveType> hiveTypes = handle.getHiveTypes();
-        return new HiveBucketFunction(bucketCount, hiveTypes);
+        BucketFunctionType bucketFunctionType = handle.getBucketFunctionType();
+        switch (bucketFunctionType) {
+            case HIVE_COMPATIBLE:
+                return createHiveCompatibleBucketFunction(bucketCount, handle.getHiveTypes().get());
+            case PRESTO_NATIVE:
+                return createPrestoNativeBucketFunction(bucketCount, handle.getTypes().get());
+            default:
+                throw new IllegalArgumentException("Unsupported bucket function type " + bucketFunctionType);
+        }
     }
 
     @Override
@@ -78,6 +87,13 @@ public class HiveNodePartitioningProvider
     {
         return value -> ((HiveSplit) value).getReadBucketNumber()
                 .orElseThrow(() -> new IllegalArgumentException("Bucket number not set in split"));
+    }
+
+    @Override
+    public int getBucketCount(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
+    {
+        HivePartitioningHandle handle = (HivePartitioningHandle) partitioningHandle;
+        return handle.getBucketCount();
     }
 
     @Override

@@ -69,6 +69,7 @@ public class FeaturesConfig
     private DataSize joinMaxBroadcastTableSize;
     private boolean colocatedJoinsEnabled = true;
     private boolean groupedExecutionForAggregationEnabled;
+    private boolean groupedExecutionForJoinEnabled = true;
     private boolean groupedExecutionForEligibleTableScansEnabled;
     private boolean dynamicScheduleForGroupedExecution;
     private boolean recoverableGroupedExecutionEnabled;
@@ -116,6 +117,7 @@ public class FeaturesConfig
     private double spillMaxUsedSpaceThreshold = 0.9;
     private boolean iterativeOptimizerEnabled = true;
     private boolean enableStatsCalculator = true;
+    private boolean enableStatsCollectionForTemporaryTable;
     private boolean ignoreStatsCalculatorFailures = true;
     private boolean printStatsForNonJoinQuery;
     private boolean defaultFilterFactorEnabled;
@@ -152,6 +154,7 @@ public class FeaturesConfig
     private boolean useLegacyScheduler = true;
     private boolean optimizeCommonSubExpressions = true;
     private boolean preferDistributedUnion = true;
+    private boolean optimizeNullsInJoin;
 
     private PartitioningPrecisionStrategy partitioningPrecisionStrategy = PartitioningPrecisionStrategy.AUTOMATIC;
 
@@ -376,6 +379,19 @@ public class FeaturesConfig
     public FeaturesConfig setGroupedExecutionForAggregationEnabled(boolean groupedExecutionForAggregationEnabled)
     {
         this.groupedExecutionForAggregationEnabled = groupedExecutionForAggregationEnabled;
+        return this;
+    }
+
+    public boolean isGroupedExecutionForJoinEnabled()
+    {
+        return groupedExecutionForJoinEnabled;
+    }
+
+    @Config("grouped-execution-for-join-enabled")
+    @ConfigDescription("Experimental: Use grouped execution for join when possible")
+    public FeaturesConfig setGroupedExecutionForJoinEnabled(boolean groupedExecutionForJoinEnabled)
+    {
+        this.groupedExecutionForJoinEnabled = groupedExecutionForJoinEnabled;
         return this;
     }
 
@@ -762,10 +778,22 @@ public class FeaturesConfig
         return enableStatsCalculator;
     }
 
+    public boolean isEnableStatsCollectionForTemporaryTable()
+    {
+        return enableStatsCollectionForTemporaryTable;
+    }
+
     @Config("experimental.enable-stats-calculator")
     public FeaturesConfig setEnableStatsCalculator(boolean enableStatsCalculator)
     {
         this.enableStatsCalculator = enableStatsCalculator;
+        return this;
+    }
+
+    @Config("experimental.enable-stats-collection-for-temporary-table")
+    public FeaturesConfig setEnableStatsCollectionForTemporaryTable(boolean enableStatsCollectionForTemporaryTable)
+    {
+        this.enableStatsCollectionForTemporaryTable = enableStatsCollectionForTemporaryTable;
         return this;
     }
 
@@ -1248,6 +1276,18 @@ public class FeaturesConfig
     public FeaturesConfig setPreferDistributedUnion(boolean preferDistributedUnion)
     {
         this.preferDistributedUnion = preferDistributedUnion;
+        return this;
+    }
+
+    public boolean isOptimizeNullsInJoin()
+    {
+        return optimizeNullsInJoin;
+    }
+
+    @Config("optimize-nulls-in-join")
+    public FeaturesConfig setOptimizeNullsInJoin(boolean optimizeNullsInJoin)
+    {
+        this.optimizeNullsInJoin = optimizeNullsInJoin;
         return this;
     }
 }

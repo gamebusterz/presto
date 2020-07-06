@@ -270,6 +270,7 @@ import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_BRO
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.SCALED_WRITER_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.plan.AssignmentUtils.identityAssignments;
+import static com.facebook.presto.sql.planner.plan.JoinNode.DistributionType.REPLICATED;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.FULL;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.RIGHT;
@@ -314,7 +315,6 @@ public class LocalExecutionPlanner
     private final IndexJoinLookupStats indexJoinLookupStats;
     private final DataSize maxPartialAggregationMemorySize;
     private final DataSize maxPagePartitioningBufferSize;
-    private final int maxPagePartitioningBufferCount;
     private final DataSize maxLocalExchangeBufferSize;
     private final SpillerFactory spillerFactory;
     private final SingleStreamSpillerFactory singleStreamSpillerFactory;
@@ -370,7 +370,6 @@ public class LocalExecutionPlanner
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
         this.maxPartialAggregationMemorySize = taskManagerConfig.getMaxPartialAggregationMemoryUsage();
         this.maxPagePartitioningBufferSize = taskManagerConfig.getMaxPagePartitioningBufferSize();
-        this.maxPagePartitioningBufferCount = taskManagerConfig.getMaxPagePartitioningBufferCount();
         this.maxLocalExchangeBufferSize = taskManagerConfig.getMaxLocalExchangeBufferSize();
         this.pagesIndexFactory = requireNonNull(pagesIndexFactory, "pagesIndexFactory is null");
         this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
@@ -436,7 +435,7 @@ public class LocalExecutionPlanner
         }
 
         if (isOptimizedRepartitioningEnabled(taskContext.getSession())) {
-            return new OptimizedPartitionedOutputFactory(outputBuffer, maxPagePartitioningBufferSize, maxPagePartitioningBufferCount);
+            return new OptimizedPartitionedOutputFactory(outputBuffer, maxPagePartitioningBufferSize);
         }
         else {
             return new PartitionedOutputFactory(outputBuffer, maxPagePartitioningBufferSize);
@@ -1281,7 +1280,7 @@ public class LocalExecutionPlanner
 
             try {
                 if (columns != null) {
-                    Supplier<CursorProcessor> cursorProcessor = expressionCompiler.compileCursorProcessor(session.getSqlFunctionProperties(), filterExpression, projections, sourceNode.getId());
+                    Supplier<CursorProcessor> cursorProcessor = expressionCompiler.compileCursorProcessor(session.getSqlFunctionProperties(), filterExpression, projections, sourceNode.getId(), isOptimizeCommonSubExpressions(session));
                     Supplier<PageProcessor> pageProcessor = expressionCompiler.compilePageProcessor(session.getSqlFunctionProperties(), filterExpression, projections, isOptimizeCommonSubExpressions(session), Optional.of(context.getStageExecutionId() + "_" + planNodeId));
 
                     SourceOperatorFactory operatorFactory = new ScanFilterAndProjectOperatorFactory(
@@ -2050,6 +2049,10 @@ public class LocalExecutionPlanner
                 PhysicalOperation probeSource,
                 LocalExecutionPlanContext context)
         {
+            // Determine if planning broadcast join
+            Optional<JoinNode.DistributionType> distributionType = node.getDistributionType();
+            boolean isBroadcastJoin = distributionType.isPresent() && distributionType.get() == REPLICATED;
+
             LocalExecutionPlanContext buildContext = context.createSubContext();
             PhysicalOperation buildSource = buildNode.accept(this, buildContext);
 
@@ -2128,7 +2131,8 @@ public class LocalExecutionPlanner
                     10_000,
                     pagesIndexFactory,
                     spillEnabled && !buildOuter && partitionCount > 1,
-                    singleStreamSpillerFactory);
+                    singleStreamSpillerFactory,
+                    isBroadcastJoin);
 
             context.addDriverFactory(
                     buildContext.isInputDriver(),
@@ -2700,7 +2704,8 @@ public class LocalExecutionPlanner
 
         private AccumulatorFactory buildAccumulatorFactory(
                 PhysicalOperation source,
-                Aggregation aggregation)
+                Aggregation aggregation,
+                boolean spillEnabled)
         {
             FunctionManager functionManager = metadata.getFunctionManager();
             InternalAggregationFunction internalAggregationFunction = functionManager.getAggregateFunctionImplementation(aggregation.getFunctionHandle());
@@ -2748,6 +2753,7 @@ public class LocalExecutionPlanner
                     aggregation.isDistinct(),
                     joinCompiler,
                     lambdaProviders,
+                    spillEnabled,
                     session);
         }
 
@@ -2781,7 +2787,7 @@ public class LocalExecutionPlanner
             for (Map.Entry<VariableReferenceExpression, Aggregation> entry : aggregations.entrySet()) {
                 VariableReferenceExpression variable = entry.getKey();
                 Aggregation aggregation = entry.getValue();
-                accumulatorFactories.add(buildAccumulatorFactory(source, aggregation));
+                accumulatorFactories.add(buildAccumulatorFactory(source, aggregation, false));
                 outputMappings.put(variable, outputChannel); // one aggregation per channel
                 outputChannel++;
             }
@@ -2844,7 +2850,7 @@ public class LocalExecutionPlanner
                 VariableReferenceExpression variable = entry.getKey();
                 Aggregation aggregation = entry.getValue();
 
-                accumulatorFactories.add(buildAccumulatorFactory(source, aggregation));
+                accumulatorFactories.add(buildAccumulatorFactory(source, aggregation, !isStreamable && spillEnabled));
                 aggregationOutputVariables.add(variable);
             }
 

@@ -19,7 +19,6 @@ import com.facebook.presto.common.type.DecimalParseResult;
 import com.facebook.presto.common.type.Decimals;
 import com.facebook.presto.common.type.SqlDecimal;
 import com.facebook.presto.common.type.Type;
-import com.facebook.presto.metadata.BuiltInFunction;
 import com.facebook.presto.metadata.FunctionListBuilder;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.SqlScalarFunction;
@@ -27,6 +26,7 @@ import com.facebook.presto.spi.ErrorCodeSupplier;
 import com.facebook.presto.spi.Plugin;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.StandardErrorCode;
+import com.facebook.presto.spi.function.SqlFunction;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.google.common.collect.ImmutableList;
@@ -52,6 +52,8 @@ import static org.testng.Assert.fail;
 
 public abstract class AbstractTestFunctions
 {
+    private static final double DELTA = 1e-5;
+
     protected final Session session;
     private final FeaturesConfig config;
     protected FunctionAssertions functionAssertions;
@@ -93,6 +95,16 @@ public abstract class AbstractTestFunctions
     protected void assertFunction(String projection, Type expectedType, Object expected)
     {
         functionAssertions.assertFunction(projection, expectedType, expected);
+    }
+
+    protected void assertFunctionWithError(String projection, Type expectedType, double expected)
+    {
+        assertFunctionWithError(projection, expectedType, expected, DELTA);
+    }
+
+    protected void assertFunctionWithError(String projection, Type expectedType, double expected, double delta)
+    {
+        functionAssertions.assertFunctionWithError(projection, expectedType, expected, delta);
     }
 
     protected void assertOperator(OperatorType operator, String value, Type expectedType, Object expected)
@@ -192,7 +204,7 @@ public abstract class AbstractTestFunctions
     protected void registerScalar(Class<?> clazz)
     {
         Metadata metadata = functionAssertions.getMetadata();
-        List<BuiltInFunction> functions = new FunctionListBuilder()
+        List<SqlFunction> functions = new FunctionListBuilder()
                 .scalars(clazz)
                 .getFunctions();
         metadata.getFunctionManager().registerBuiltInFunctions(functions);
@@ -201,7 +213,7 @@ public abstract class AbstractTestFunctions
     protected void registerParametricScalar(Class<?> clazz)
     {
         Metadata metadata = functionAssertions.getMetadata();
-        List<BuiltInFunction> functions = new FunctionListBuilder()
+        List<SqlFunction> functions = new FunctionListBuilder()
                 .scalar(clazz)
                 .getFunctions();
         metadata.getFunctionManager().registerBuiltInFunctions(functions);

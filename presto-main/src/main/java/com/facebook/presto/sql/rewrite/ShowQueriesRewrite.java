@@ -522,15 +522,15 @@ final class ShowQueriesRewrite
                         node.getName(),
                         false,
                         sqlFunction.getParameters().stream()
-                                .map(parameter -> new SqlParameterDeclaration(new Identifier(parameter.getName(), true), parameter.getType().toString()))
+                                .map(parameter -> new SqlParameterDeclaration(new Identifier(parameter.getName()), parameter.getType().toString()))
                                 .collect(toImmutableList()),
                         sqlFunction.getSignature().getReturnType().toString(),
                         Optional.of(sqlFunction.getDescription()),
                         new RoutineCharacteristics(
-                                Language.valueOf(sqlFunction.getRoutineCharacteristics().getLanguage().name()),
+                                new Language(sqlFunction.getRoutineCharacteristics().getLanguage().getLanguage()),
                                 Determinism.valueOf(sqlFunction.getRoutineCharacteristics().getDeterminism().name()),
                                 NullCallClause.valueOf(sqlFunction.getRoutineCharacteristics().getNullCallClause().name())),
-                        sqlParser.createRoutineBody(sqlFunction.getBody(), createParsingOptions(session, warningCollector)));
+                        sqlParser.createReturn(sqlFunction.getBody(), createParsingOptions(session, warningCollector)));
                 rows.add(row(
                         new StringLiteral(formatSql(createFunction, Optional.empty())),
                         new StringLiteral(function.getSignature().getArgumentTypes().stream()
@@ -613,7 +613,7 @@ final class ShowQueriesRewrite
                         signature.isVariableArity() ? TRUE_LITERAL : FALSE_LITERAL,
                         builtIn ? TRUE_LITERAL : FALSE_LITERAL,
                         function instanceof SqlInvokedFunction
-                                ? new StringLiteral(((SqlInvokedFunction) function).getRoutineCharacteristics().getLanguage().name().toLowerCase(ENGLISH))
+                                ? new StringLiteral(((SqlInvokedFunction) function).getRoutineCharacteristics().getLanguage().getLanguage().toLowerCase(ENGLISH))
                                 : new StringLiteral("")));
             }
 
@@ -634,7 +634,11 @@ final class ShowQueriesRewrite
                             .map(entry -> aliasedName(entry.getKey(), entry.getValue()))
                             .collect(toImmutableList())),
                     aliased(new Values(rows.build()), "functions", ImmutableList.copyOf(columns.keySet())),
-                    ordering(
+                    node.getLikePattern().map(pattern -> new LikePredicate(
+                            identifier("function_name"),
+                            new StringLiteral(pattern),
+                            node.getEscape().map(StringLiteral::new))),
+                    Optional.of(ordering(
                             descending("built_in"),
                             new SortItem(
                                     functionCall("lower", identifier("function_name")),
@@ -642,7 +646,7 @@ final class ShowQueriesRewrite
                                     SortItem.NullOrdering.UNDEFINED),
                             ascending("return_type"),
                             ascending("argument_types"),
-                            ascending("function_type")));
+                            ascending("function_type"))));
         }
 
         private static String getFunctionType(SqlFunction function)

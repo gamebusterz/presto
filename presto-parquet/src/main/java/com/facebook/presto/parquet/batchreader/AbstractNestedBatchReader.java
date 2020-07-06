@@ -45,9 +45,9 @@ public abstract class AbstractNestedBatchReader
 
     protected Field field;
     protected int nextBatchSize;
+    protected int readOffset;
 
     private Dictionary dictionary;
-    private int readOffset;
     private RepetitionLevelDecoder repetitionLevelDecoder;
     private DefinitionLevelDecoder definitionLevelDecoder;
     private ValuesDecoder valuesDecoder;
@@ -61,7 +61,7 @@ public abstract class AbstractNestedBatchReader
     protected abstract ColumnChunk readNestedWithNull()
             throws IOException;
 
-    protected abstract void skip(int skipSize)
+    protected abstract void seek()
             throws IOException;
 
     public AbstractNestedBatchReader(RichColumnDescriptor columnDescriptor)
@@ -120,15 +120,6 @@ public abstract class AbstractNestedBatchReader
         return columnChunk;
     }
 
-    private void seek()
-            throws IOException
-    {
-        if (readOffset == 0) {
-            return;
-        }
-        skip(readOffset);
-    }
-
     protected void readNextPage()
     {
         remainingCountInPage = 0;
@@ -145,11 +136,11 @@ public abstract class AbstractNestedBatchReader
         remainingCountInPage = page.getValueCount();
     }
 
-    protected final RepetitionLevelDecodingInfo readRepetitionLevels(int batchSize)
+    protected final RepetitionLevelDecodingContext readRepetitionLevels(int batchSize)
             throws IOException
     {
         IntList repetitionLevels = new IntArrayList(batchSize);
-        RepetitionLevelDecodingInfo repetitionLevelDecodingInfo = new RepetitionLevelDecodingInfo();
+        RepetitionLevelDecodingContext repetitionLevelDecodingContext = new RepetitionLevelDecodingContext();
         int remainingInBatch = batchSize + 1;
 
         if (remainingCountInPage == 0) {
@@ -168,7 +159,7 @@ public abstract class AbstractNestedBatchReader
             int valueCount = repetitionLevelDecoder.readNext(repetitionLevels, remainingInBatch);
             if (valueCount == 0) {
                 int endOffset = repetitionLevels.size();
-                repetitionLevelDecodingInfo.add(new DefinitionLevelValuesDecoderInfo(definitionLevelDecoder, valuesDecoder, startOffset, endOffset));
+                repetitionLevelDecodingContext.add(new DefinitionLevelValuesDecoderContext(definitionLevelDecoder, valuesDecoder, startOffset, endOffset));
                 remainingCountInPage -= (endOffset - startOffset);
                 startOffset = endOffset;
                 readNextPage();
@@ -187,23 +178,23 @@ public abstract class AbstractNestedBatchReader
         }
 
         if (repetitionLevelDecoder != null) {
-            repetitionLevelDecodingInfo.add(new DefinitionLevelValuesDecoderInfo(definitionLevelDecoder, valuesDecoder, startOffset, repetitionLevels.size()));
+            repetitionLevelDecodingContext.add(new DefinitionLevelValuesDecoderContext(definitionLevelDecoder, valuesDecoder, startOffset, repetitionLevels.size()));
         }
-        repetitionLevelDecodingInfo.setRepetitionLevels(repetitionLevels.toIntArray());
-        return repetitionLevelDecodingInfo;
+        repetitionLevelDecodingContext.setRepetitionLevels(repetitionLevels.toIntArray());
+        return repetitionLevelDecodingContext;
     }
 
-    protected final DefinitionLevelDecodingInfo readDefinitionLevels(List<DefinitionLevelValuesDecoderInfo> decoderInfos, int batchSize)
+    protected final DefinitionLevelDecodingContext readDefinitionLevels(List<DefinitionLevelValuesDecoderContext> decoderInfos, int batchSize)
             throws IOException
     {
-        DefinitionLevelDecodingInfo definitionLevelDecodingInfo = new DefinitionLevelDecodingInfo();
+        DefinitionLevelDecodingContext definitionLevelDecodingContext = new DefinitionLevelDecodingContext();
 
         int[] definitionLevels = new int[batchSize];
         int remainingInBatch = batchSize;
-        for (DefinitionLevelValuesDecoderInfo decoderInfo : decoderInfos) {
+        for (DefinitionLevelValuesDecoderContext decoderInfo : decoderInfos) {
             int readChunkSize = decoderInfo.getEnd() - decoderInfo.getStart();
             decoderInfo.getDefinitionLevelDecoder().readNext(definitionLevels, decoderInfo.getStart(), readChunkSize);
-            definitionLevelDecodingInfo.add(new ValuesDecoderInfo(decoderInfo.getValuesDecoder(), decoderInfo.getStart(), decoderInfo.getEnd()));
+            definitionLevelDecodingContext.add(new ValuesDecoderContext(decoderInfo.getValuesDecoder(), decoderInfo.getStart(), decoderInfo.getEnd()));
             remainingInBatch -= readChunkSize;
         }
 
@@ -211,7 +202,7 @@ public abstract class AbstractNestedBatchReader
             throw new IllegalStateException("We didn't read correct number of definitionLevels");
         }
 
-        definitionLevelDecodingInfo.setDefinitionLevels(definitionLevels);
-        return definitionLevelDecodingInfo;
+        definitionLevelDecodingContext.setDefinitionLevels(definitionLevels);
+        return definitionLevelDecodingContext;
     }
 }

@@ -19,35 +19,45 @@ import com.facebook.presto.execution.Lifespan;
 import com.facebook.presto.execution.ScheduledSplit;
 import com.facebook.presto.execution.TaskSource;
 import com.facebook.presto.execution.scheduler.TableWriteInfo;
-import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.spark.PrestoSparkTaskDescriptor;
-import com.facebook.presto.spark.classloader_interface.IntegerIdentityPartitioner;
-import com.facebook.presto.spark.classloader_interface.PrestoSparkRow;
+import com.facebook.presto.spark.classloader_interface.MutablePartitionId;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkMutableRow;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkPartitioner;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkSerializedPage;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkShuffleSerializer;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskExecutorFactoryProvider;
-import com.facebook.presto.spark.classloader_interface.PrestoSparkZipRdd;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskOutput;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskProcessor;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskRdd;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskSourceRdd;
 import com.facebook.presto.spark.classloader_interface.SerializedPrestoSparkTaskDescriptor;
+import com.facebook.presto.spark.classloader_interface.SerializedPrestoSparkTaskSource;
 import com.facebook.presto.spark.classloader_interface.SerializedTaskStats;
+import com.facebook.presto.spi.ConnectorId;
+import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
 import com.facebook.presto.spi.plan.PlanNode;
-import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.split.SplitManager;
 import com.facebook.presto.split.SplitSource;
 import com.facebook.presto.sql.planner.PartitioningHandle;
+import com.facebook.presto.sql.planner.PartitioningProviderManager;
 import com.facebook.presto.sql.planner.PlanFragment;
-import com.facebook.presto.sql.planner.SystemPartitioningHandle;
 import com.facebook.presto.sql.planner.plan.PlanFragmentId;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSetMultimap;
+import com.google.common.collect.ListMultimap;
+import com.google.common.collect.SetMultimap;
 import org.apache.spark.Partitioner;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.rdd.RDD;
+import org.apache.spark.rdd.ShuffledRDD;
 import org.apache.spark.util.CollectionAccumulator;
 import scala.Tuple2;
 import scala.reflect.ClassTag;
@@ -55,20 +65,20 @@ import scala.reflect.ClassTag;
 import javax.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
-import java.util.stream.Collectors;
+import java.util.function.ToIntFunction;
 import java.util.stream.IntStream;
 
 import static com.facebook.airlift.concurrent.MoreFutures.getFutureValue;
 import static com.facebook.presto.SystemSessionProperties.getHashPartitionCount;
 import static com.facebook.presto.spark.PrestoSparkSessionProperties.getSparkInitialPartitionCount;
-import static com.facebook.presto.spark.classloader_interface.TaskProcessors.createTaskProcessor;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.connector.ConnectorSplitManager.SplitSchedulingStrategy.UNGROUPED_SCHEDULING;
 import static com.facebook.presto.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
@@ -87,48 +97,47 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.collect.Multimaps.asMap;
 import static com.google.common.collect.Sets.difference;
 import static com.google.common.collect.Sets.union;
 import static java.lang.String.format;
 import static java.util.Collections.shuffle;
 import static java.util.Objects.requireNonNull;
-import static java.util.function.Function.identity;
-import static java.util.stream.Collectors.mapping;
-import static java.util.stream.Collectors.toSet;
 
 public class PrestoSparkRddFactory
 {
     private final SplitManager splitManager;
-    private final Metadata metadata;
+    private final PartitioningProviderManager partitioningProviderManager;
     private final JsonCodec<PrestoSparkTaskDescriptor> taskDescriptorJsonCodec;
+    private final JsonCodec<TaskSource> taskSourceJsonCodec;
 
     @Inject
-    public PrestoSparkRddFactory(SplitManager splitManager, Metadata metadata, JsonCodec<PrestoSparkTaskDescriptor> taskDescriptorJsonCodec)
+    public PrestoSparkRddFactory(
+            SplitManager splitManager,
+            PartitioningProviderManager partitioningProviderManager,
+            JsonCodec<PrestoSparkTaskDescriptor> taskDescriptorJsonCodec,
+            JsonCodec<TaskSource> taskSourceJsonCodec)
     {
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.partitioningProviderManager = requireNonNull(partitioningProviderManager, "partitioningProviderManager is null");
         this.taskDescriptorJsonCodec = requireNonNull(taskDescriptorJsonCodec, "taskDescriptorJsonCodec is null");
+        this.taskSourceJsonCodec = requireNonNull(taskSourceJsonCodec, "taskSourceJsonCodec is null");
     }
 
-    public JavaPairRDD<Integer, PrestoSparkRow> createSparkRdd(
+    public <T extends PrestoSparkTaskOutput> JavaPairRDD<MutablePartitionId, T> createSparkRdd(
             JavaSparkContext sparkContext,
             Session session,
             PlanFragment fragment,
-            Map<PlanFragmentId, JavaPairRDD<Integer, PrestoSparkRow>> rddInputs,
+            Map<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> rddInputs,
             Map<PlanFragmentId, Broadcast<List<PrestoSparkSerializedPage>>> broadcastInputs,
             PrestoSparkTaskExecutorFactoryProvider executorFactoryProvider,
             CollectionAccumulator<SerializedTaskStats> taskStatsCollector,
-            TableWriteInfo tableWriteInfo)
+            TableWriteInfo tableWriteInfo,
+            Class<T> outputType)
     {
         checkArgument(!fragment.getStageExecutionDescriptor().isStageGroupedExecution(), "unexpected grouped execution fragment: %s", fragment.getId());
 
         PartitioningHandle partitioning = fragment.getPartitioning();
-
-        if (!(partitioning.getConnectorHandle() instanceof SystemPartitioningHandle)) {
-            // TODO: add support for bucketed table
-            throw new PrestoException(NOT_SUPPORTED, "Partitioned (bucketed) tables are not yet supported by Presto on Spark");
-        }
 
         if (partitioning.equals(SCALED_WRITER_DISTRIBUTION)) {
             throw new PrestoException(NOT_SUPPORTED, "Automatic writers scaling is not supported by Presto on Spark");
@@ -153,20 +162,13 @@ public class PrestoSparkRddFactory
         // TODO: We should consider removing ARBITRARY_DISTRIBUTION.
         checkArgument(!partitioning.equals(ARBITRARY_DISTRIBUTION), "ARBITRARY_DISTRIBUTION is not expected to be set as a fragment distribution");
 
-        int hashPartitionCount = getHashPartitionCount(session);
+        // set the number of output partitions
+        fragment = configureOutputPartitioning(session, fragment);
 
-        // configure number of output partitions
-        if (fragment.getPartitioningScheme().getPartitioning().getHandle().equals(FIXED_HASH_DISTRIBUTION)) {
-            fragment = fragment.withBucketToPartition(Optional.of(IntStream.range(0, hashPartitionCount).toArray()));
-        }
-
-        if (partitioning.equals(SINGLE_DISTRIBUTION) || partitioning.equals(FIXED_HASH_DISTRIBUTION)) {
-            checkArgument(
-                    fragment.getTableScanSchedulingOrder().isEmpty(),
-                    "Fragment with is not expected to have table scans. fragmentId: %s, fragment partitioning %s",
-                    fragment.getId(),
-                    fragment.getPartitioning());
-
+        if (partitioning.equals(SINGLE_DISTRIBUTION) ||
+                partitioning.equals(FIXED_HASH_DISTRIBUTION) ||
+                partitioning.equals(SOURCE_DISTRIBUTION) ||
+                partitioning.getConnectorId().isPresent()) {
             for (RemoteSourceNode remoteSource : fragment.getRemoteSourceNodes()) {
                 if (remoteSource.isEnsureSourceOrdering() || remoteSource.getOrderingScheme().isPresent()) {
                     throw new PrestoException(NOT_SUPPORTED, format(
@@ -176,12 +178,10 @@ public class PrestoSparkRddFactory
                 }
             }
 
-            Partitioner inputPartitioner = createPartitioner(partitioning, hashPartitionCount);
+            Map<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> partitionedInputs = rddInputs.entrySet().stream()
+                    .collect(toImmutableMap(Entry::getKey, entry -> partitionBy(entry.getValue(), createPartitioner(session, partitioning))));
 
-            Map<PlanFragmentId, JavaPairRDD<Integer, PrestoSparkRow>> partitionedInputs = rddInputs.entrySet().stream()
-                    .collect(toImmutableMap(Entry::getKey, entry -> entry.getValue().partitionBy(inputPartitioner)));
-
-            return createIntermediateRdd(
+            return createRdd(
                     sparkContext,
                     session,
                     fragment,
@@ -189,131 +189,169 @@ public class PrestoSparkRddFactory
                     taskStatsCollector,
                     tableWriteInfo,
                     partitionedInputs,
-                    broadcastInputs);
-        }
-        else if (partitioning.equals(SOURCE_DISTRIBUTION)) {
-            checkArgument(rddInputs.isEmpty(), "rddInputs is expected to be empty for SOURCE_DISTRIBUTION fragment: %s", fragment.getId());
-            return createSourceRdd(
-                    sparkContext,
-                    session,
-                    fragment,
-                    executorFactoryProvider,
-                    taskStatsCollector,
-                    tableWriteInfo,
-                    broadcastInputs);
+                    broadcastInputs,
+                    outputType);
         }
         else {
             throw new IllegalArgumentException(format("Unexpected fragment partitioning %s, fragmentId: %s", partitioning, fragment.getId()));
         }
     }
 
-    private static Partitioner createPartitioner(PartitioningHandle partitioning, int partitionCount)
+    private PlanFragment configureOutputPartitioning(Session session, PlanFragment fragment)
+    {
+        PartitioningHandle outputPartitioningHandle = fragment.getPartitioningScheme().getPartitioning().getHandle();
+        if (outputPartitioningHandle.equals(FIXED_HASH_DISTRIBUTION)) {
+            int hashPartitionCount = getHashPartitionCount(session);
+            return fragment.withBucketToPartition(Optional.of(IntStream.range(0, hashPartitionCount).toArray()));
+        }
+        if (outputPartitioningHandle.getConnectorId().isPresent()) {
+            int connectorPartitionCount = getPartitionCount(session, outputPartitioningHandle);
+            return fragment.withBucketToPartition(Optional.of(IntStream.range(0, connectorPartitionCount).toArray()));
+        }
+        return fragment;
+    }
+
+    private static JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow> partitionBy(JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow> rdd, Partitioner partitioner)
+    {
+        JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow> javaPairRdd = rdd.partitionBy(partitioner);
+        ShuffledRDD<MutablePartitionId, PrestoSparkMutableRow, PrestoSparkMutableRow> shuffledRdd = (ShuffledRDD<MutablePartitionId, PrestoSparkMutableRow, PrestoSparkMutableRow>) javaPairRdd.rdd();
+        shuffledRdd.setSerializer(new PrestoSparkShuffleSerializer());
+        return JavaPairRDD.fromRDD(
+                shuffledRdd,
+                classTag(MutablePartitionId.class),
+                classTag(PrestoSparkMutableRow.class));
+    }
+
+    private Partitioner createPartitioner(Session session, PartitioningHandle partitioning)
     {
         if (partitioning.equals(SINGLE_DISTRIBUTION)) {
-            return new IntegerIdentityPartitioner(1);
+            return new PrestoSparkPartitioner(1);
         }
         if (partitioning.equals(FIXED_HASH_DISTRIBUTION)) {
-            return new IntegerIdentityPartitioner(partitionCount);
+            int hashPartitionCount = getHashPartitionCount(session);
+            return new PrestoSparkPartitioner(hashPartitionCount);
+        }
+        if (partitioning.getConnectorId().isPresent()) {
+            int connectorPartitionCount = getPartitionCount(session, partitioning);
+            return new PrestoSparkPartitioner(connectorPartitionCount);
         }
         throw new IllegalArgumentException(format("Unexpected fragment partitioning %s", partitioning));
     }
 
-    private JavaPairRDD<Integer, PrestoSparkRow> createIntermediateRdd(
+    private <T extends PrestoSparkTaskOutput> JavaPairRDD<MutablePartitionId, T> createRdd(
             JavaSparkContext sparkContext,
             Session session,
             PlanFragment fragment,
             PrestoSparkTaskExecutorFactoryProvider executorFactoryProvider,
             CollectionAccumulator<SerializedTaskStats> taskStatsCollector,
             TableWriteInfo tableWriteInfo,
-            Map<PlanFragmentId, JavaPairRDD<Integer, PrestoSparkRow>> rddInputs,
-            Map<PlanFragmentId, Broadcast<List<PrestoSparkSerializedPage>>> broadcastInputs)
+            Map<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> rddInputs,
+            Map<PlanFragmentId, Broadcast<List<PrestoSparkSerializedPage>>> broadcastInputs,
+            Class<T> outputType)
     {
         checkInputs(fragment.getRemoteSourceNodes(), rddInputs, broadcastInputs);
 
-        List<TableScanNode> tableScans = findTableScanNodes(fragment.getRoot());
-        verify(tableScans.isEmpty(), "no table scans is expected");
+        PrestoSparkTaskDescriptor taskDescriptor = new PrestoSparkTaskDescriptor(
+                session.toSessionRepresentation(),
+                session.getIdentity().getExtraCredentials(),
+                fragment,
+                tableWriteInfo);
+        SerializedPrestoSparkTaskDescriptor serializedTaskDescriptor = new SerializedPrestoSparkTaskDescriptor(
+                taskDescriptorJsonCodec.toJsonBytes(taskDescriptor));
 
-        PrestoSparkTaskDescriptor taskDescriptor = createIntermediateTaskDescriptor(session, tableWriteInfo, fragment);
-        SerializedPrestoSparkTaskDescriptor serializedTaskDescriptor = new SerializedPrestoSparkTaskDescriptor(taskDescriptorJsonCodec.toJsonBytes(taskDescriptor));
-
-        if (rddInputs.size() == 0) {
-            checkArgument(fragment.getPartitioning().equals(SINGLE_DISTRIBUTION), "SINGLE_DISTRIBUTION partitioning is expected: %s", fragment.getPartitioning());
-            return sparkContext.parallelize(ImmutableList.of(serializedTaskDescriptor), 1)
-                    .mapPartitionsToPair(createTaskProcessor(
-                            executorFactoryProvider,
-                            taskStatsCollector,
-                            toTaskProcessorBroadcastInputs(broadcastInputs)));
+        Optional<Integer> numberOfShufflePartitions = Optional.empty();
+        Map<String, RDD<Tuple2<MutablePartitionId, PrestoSparkMutableRow>>> shuffleInputRddMap = new HashMap<>();
+        for (Map.Entry<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> input : rddInputs.entrySet()) {
+            RDD<Tuple2<MutablePartitionId, PrestoSparkMutableRow>> rdd = input.getValue().rdd();
+            shuffleInputRddMap.put(input.getKey().toString(), rdd);
+            if (!numberOfShufflePartitions.isPresent()) {
+                numberOfShufflePartitions = Optional.of(rdd.getNumPartitions());
+            }
+            else {
+                checkArgument(
+                        numberOfShufflePartitions.get() == rdd.getNumPartitions(),
+                        "Incompatible number of input partitions: %s != %s",
+                        numberOfShufflePartitions.get(),
+                        rdd.getNumPartitions());
+            }
         }
 
-        ImmutableList.Builder<String> fragmentIds = ImmutableList.builder();
-        ImmutableList.Builder<RDD<Tuple2<Integer, PrestoSparkRow>>> rdds = ImmutableList.builder();
-        for (Map.Entry<PlanFragmentId, JavaPairRDD<Integer, PrestoSparkRow>> input : rddInputs.entrySet()) {
-            fragmentIds.add(input.getKey().toString());
-            rdds.add(input.getValue().rdd());
-        }
-
-        Function<List<Iterator<Tuple2<Integer, PrestoSparkRow>>>, Iterator<Tuple2<Integer, PrestoSparkRow>>> taskProcessor = createTaskProcessor(
+        PrestoSparkTaskProcessor<T> taskProcessor = new PrestoSparkTaskProcessor<>(
                 executorFactoryProvider,
                 serializedTaskDescriptor,
-                fragmentIds.build(),
                 taskStatsCollector,
-                toTaskProcessorBroadcastInputs(broadcastInputs));
+                toTaskProcessorBroadcastInputs(broadcastInputs),
+                outputType);
+
+        Optional<PrestoSparkTaskSourceRdd> taskSourceRdd;
+        List<TableScanNode> tableScans = findTableScanNodes(fragment.getRoot());
+        if (!tableScans.isEmpty()) {
+            PartitioningHandle partitioning = fragment.getPartitioning();
+            taskSourceRdd = Optional.of(createTaskSourcesRdd(sparkContext, session, partitioning, tableScans, numberOfShufflePartitions));
+        }
+        else if (rddInputs.size() == 0) {
+            checkArgument(fragment.getPartitioning().equals(SINGLE_DISTRIBUTION), "SINGLE_DISTRIBUTION partitioning is expected: %s", fragment.getPartitioning());
+            // In case of no inputs we still need to schedule a task.
+            // Task with no inputs may produce results (e.g.: ValuesNode).
+            // To force the task to be scheduled we create a PrestoSparkTaskSourceRdd that contains exactly one partition.
+            // Since there's also no table scans in the fragment, the list of TaskSource's for this partition is empty.
+            taskSourceRdd = Optional.of(new PrestoSparkTaskSourceRdd(sparkContext.sc(), ImmutableList.of(ImmutableList.of())));
+        }
+        else {
+            taskSourceRdd = Optional.empty();
+        }
 
         return JavaPairRDD.fromRDD(
-                new PrestoSparkZipRdd(sparkContext.sc(), rdds.build(), taskProcessor),
-                classTag(Integer.class),
-                classTag(PrestoSparkRow.class));
+                PrestoSparkTaskRdd.create(sparkContext.sc(), taskSourceRdd, shuffleInputRddMap, taskProcessor),
+                classTag(MutablePartitionId.class),
+                classTag(outputType));
     }
 
-    private JavaPairRDD<Integer, PrestoSparkRow> createSourceRdd(
+    private PrestoSparkTaskSourceRdd createTaskSourcesRdd(
             JavaSparkContext sparkContext,
             Session session,
-            PlanFragment fragment,
-            PrestoSparkTaskExecutorFactoryProvider executorFactoryProvider,
-            CollectionAccumulator<SerializedTaskStats> taskStatsCollector,
-            TableWriteInfo tableWriteInfo,
-            Map<PlanFragmentId, Broadcast<List<PrestoSparkSerializedPage>>> broadcastInputs)
+            PartitioningHandle partitioning,
+            List<TableScanNode> tableScans,
+            Optional<Integer> numberOfShufflePartitions)
     {
-        checkInputs(fragment.getRemoteSourceNodes(), ImmutableMap.of(), broadcastInputs);
-
-        List<TableScanNode> tableScans = findTableScanNodes(fragment.getRoot());
-        checkArgument(
-                tableScans.size() == 1,
-                "exactly one table scan is expected in SOURCE_DISTRIBUTION fragment. fragmentId: %s, actual number of table scans: %s",
-                fragment.getId(),
-                tableScans.size());
-
-        TableScanNode tableScan = getOnlyElement(tableScans);
-
-        List<ScheduledSplit> splits = getSplits(session, tableScan);
-        shuffle(splits);
-        int initialPartitionCount = getSparkInitialPartitionCount(session);
-        int numTasks = Math.min(splits.size(), initialPartitionCount);
-        if (numTasks == 0) {
-            return JavaPairRDD.fromJavaRDD(sparkContext.emptyRDD());
+        ListMultimap<Integer, TaskSource> taskSourcesMap = ArrayListMultimap.create();
+        for (TableScanNode tableScan : tableScans) {
+            List<ScheduledSplit> scheduledSplits = getSplits(session, tableScan);
+            shuffle(scheduledSplits);
+            SetMultimap<Integer, ScheduledSplit> assignedSplits = assignSplitsToTasks(session, partitioning, scheduledSplits);
+            asMap(assignedSplits).forEach((partitionId, splits) ->
+                    taskSourcesMap.put(partitionId, new TaskSource(tableScan.getId(), splits, true)));
         }
 
-        List<List<ScheduledSplit>> assignedSplits = assignSplitsToTasks(splits, numTasks);
-
-        // let the garbage collector reclaim the memory used by the decoded splits as soon as the task descriptor is encoded
-        splits = null;
-
-        ImmutableList.Builder<SerializedPrestoSparkTaskDescriptor> serializedTaskDescriptors = ImmutableList.builder();
-        for (int i = 0; i < assignedSplits.size(); i++) {
-            List<ScheduledSplit> splitBatch = assignedSplits.get(i);
-            PrestoSparkTaskDescriptor taskDescriptor = createSourceTaskDescriptor(session, tableWriteInfo, fragment, splitBatch);
-            // TODO: consider more efficient serialization or apply compression to save precious memory on the Driver
-            byte[] jsonSerializedTaskDescriptor = taskDescriptorJsonCodec.toJsonBytes(taskDescriptor);
-            serializedTaskDescriptors.add(new SerializedPrestoSparkTaskDescriptor(jsonSerializedTaskDescriptor));
-            // let the garbage collector reclaim the memory used by the decoded splits as soon as the task descriptor is encoded
-            assignedSplits.set(i, null);
+        List<List<SerializedPrestoSparkTaskSource>> taskSourcesByPartitionId = new ArrayList<>();
+        // If the fragment contains any shuffle inputs, this value will be present
+        if (numberOfShufflePartitions.isPresent()) {
+            // All input RDD's are expected to have the same number of partitions in order to be zipped.
+            // If task sources (splits) are missing for a partition, the partition itself must still be present.
+            // Usually this can happen when joining a bucketed table with a non bucketed table.
+            // The non bucketed table will be shuffled into K partitions, where K is the number of buckets.
+            // The bucketed table may have some buckets missing. To make sure the partitions for bucketed and
+            // non bucketed tables match, an empty partition must be inserted if bucket is missing.
+            for (int partitionId = 0; partitionId < numberOfShufflePartitions.get(); partitionId++) {
+                // Eagerly remove task sources from the map to let GC reclaim the memory
+                // If task sources are missing for a partition the removeAll returns an empty list
+                List<TaskSource> taskSources = requireNonNull(taskSourcesMap.removeAll(partitionId), "taskSources is null");
+                taskSourcesByPartitionId.add(serializeTaskSources(taskSources));
+            }
+        }
+        else {
+            Iterator<Entry<Integer, Collection<TaskSource>>> partitionsIterator = taskSourcesMap.asMap().entrySet().iterator();
+            while (partitionsIterator.hasNext()) {
+                Entry<Integer, Collection<TaskSource>> entry = partitionsIterator.next();
+                taskSourcesByPartitionId.add(serializeTaskSources(entry.getValue()));
+                // Eagerly remove task sources from the map to let GC reclaim the memory
+                partitionsIterator.remove();
+                // make sure the entry is removed
+                verify(taskSourcesMap.get(entry.getKey()).isEmpty());
+            }
         }
 
-        return sparkContext.parallelize(serializedTaskDescriptors.build(), numTasks)
-                .mapPartitionsToPair(createTaskProcessor(
-                        executorFactoryProvider,
-                        taskStatsCollector,
-                        toTaskProcessorBroadcastInputs(broadcastInputs)));
+        return new PrestoSparkTaskSourceRdd(sparkContext.sc(), taskSourcesByPartitionId);
     }
 
     private List<ScheduledSplit> getSplits(Session session, TableScanNode tableScan)
@@ -330,49 +368,70 @@ public class PrestoSparkRddFactory
         return splits;
     }
 
-    private static List<List<ScheduledSplit>> assignSplitsToTasks(List<ScheduledSplit> splits, int numTasks)
+    private SetMultimap<Integer, ScheduledSplit> assignSplitsToTasks(Session session, PartitioningHandle partitioning, List<ScheduledSplit> splits)
     {
-        checkArgument(numTasks > 0, "numTasks must be greater then zero");
-        List<List<ScheduledSplit>> assignedSplits = new ArrayList<>();
-        for (int i = 0; i < numTasks; i++) {
-            assignedSplits.add(new ArrayList<>());
+        // splits from unbucketed table
+        if (partitioning.equals(SOURCE_DISTRIBUTION)) {
+            return assignSourceDistributionSplits(session, splits);
         }
+        // splits from bucketed table
+        return assignPartitionedSplits(session, partitioning, splits);
+    }
+
+    private static SetMultimap<Integer, ScheduledSplit> assignSourceDistributionSplits(Session session, List<ScheduledSplit> splits)
+    {
+        int taskCount = getSparkInitialPartitionCount(session);
+        checkArgument(taskCount > 0, "taskCount must be greater then zero: %s", taskCount);
+        ImmutableSetMultimap.Builder<Integer, ScheduledSplit> result = ImmutableSetMultimap.builder();
         for (int splitIndex = 0; splitIndex < splits.size(); splitIndex++) {
-            assignedSplits.get(splitIndex % numTasks).add(splits.get(splitIndex));
+            result.put(splitIndex % taskCount, splits.get(splitIndex));
         }
-        return assignedSplits;
+        return result.build();
     }
 
-    private PrestoSparkTaskDescriptor createIntermediateTaskDescriptor(Session session, TableWriteInfo tableWriteInfo, PlanFragment fragment)
+    private List<SerializedPrestoSparkTaskSource> serializeTaskSources(Collection<TaskSource> taskSources)
     {
-        return createSourceTaskDescriptor(session, tableWriteInfo, fragment, ImmutableList.of());
-    }
-
-    private PrestoSparkTaskDescriptor createSourceTaskDescriptor(
-            Session session,
-            TableWriteInfo tableWriteInfo,
-            PlanFragment fragment,
-            List<ScheduledSplit> splits)
-    {
-        Map<PlanNodeId, Set<ScheduledSplit>> splitsByPlanNode = splits.stream()
-                .collect(Collectors.groupingBy(
-                        ScheduledSplit::getPlanNodeId,
-                        mapping(identity(), toSet())));
-
-        List<TaskSource> taskSourceByPlanNode = splitsByPlanNode.entrySet().stream()
-                .map(entry -> new TaskSource(
-                        entry.getKey(),
-                        entry.getValue(),
-                        ImmutableSet.of(),
-                        true))
+        return taskSources.stream()
+                // TODO: consider compression
+                .map(taskSourceJsonCodec::toJsonBytes)
+                .map(SerializedPrestoSparkTaskSource::new)
                 .collect(toImmutableList());
+    }
 
-        return new PrestoSparkTaskDescriptor(
-                session.toSessionRepresentation(),
-                session.getIdentity().getExtraCredentials(),
-                fragment,
-                taskSourceByPlanNode,
-                tableWriteInfo);
+    private SetMultimap<Integer, ScheduledSplit> assignPartitionedSplits(Session session, PartitioningHandle partitioning, List<ScheduledSplit> splits)
+    {
+        ToIntFunction<ConnectorSplit> splitBucketFunction = getSplitBucketFunction(session, partitioning);
+        ImmutableSetMultimap.Builder<Integer, ScheduledSplit> result = ImmutableSetMultimap.builder();
+        for (ScheduledSplit scheduledSplit : splits) {
+            int partitionId = splitBucketFunction.applyAsInt(scheduledSplit.getSplit().getConnectorSplit());
+            result.put(partitionId, scheduledSplit);
+        }
+        return result.build();
+    }
+
+    private ToIntFunction<ConnectorSplit> getSplitBucketFunction(Session session, PartitioningHandle partitioning)
+    {
+        ConnectorNodePartitioningProvider partitioningProvider = getPartitioningProvider(partitioning);
+        return partitioningProvider.getSplitBucketFunction(
+                partitioning.getTransactionHandle().orElse(null),
+                session.toConnectorSession(),
+                partitioning.getConnectorHandle());
+    }
+
+    private int getPartitionCount(Session session, PartitioningHandle partitioning)
+    {
+        ConnectorNodePartitioningProvider partitioningProvider = getPartitioningProvider(partitioning);
+        return partitioningProvider.getBucketCount(
+                partitioning.getTransactionHandle().orElse(null),
+                session.toConnectorSession(),
+                partitioning.getConnectorHandle());
+    }
+
+    private ConnectorNodePartitioningProvider getPartitioningProvider(PartitioningHandle partitioning)
+    {
+        ConnectorId connectorId = partitioning.getConnectorId()
+                .orElseThrow(() -> new IllegalArgumentException("Unexpected partitioning: " + partitioning));
+        return partitioningProviderManager.getPartitioningProvider(connectorId);
     }
 
     private static List<TableScanNode> findTableScanNodes(PlanNode node)
@@ -390,7 +449,7 @@ public class PrestoSparkRddFactory
 
     private static void checkInputs(
             List<RemoteSourceNode> remoteSources,
-            Map<PlanFragmentId, JavaPairRDD<Integer, PrestoSparkRow>> rddInputs,
+            Map<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> rddInputs,
             Map<PlanFragmentId, Broadcast<List<PrestoSparkSerializedPage>>> broadcastInputs)
     {
         Set<PlanFragmentId> expectedInputs = remoteSources.stream()

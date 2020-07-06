@@ -134,7 +134,7 @@ public class SingleMapBlock
     @Nullable
     int[] getHashTable()
     {
-        return mapBlock.getHashTables().get().orElse(null);
+        return mapBlock.getHashTables().get();
     }
 
     Type getKeyType()
@@ -152,7 +152,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {
@@ -199,7 +199,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {
@@ -243,7 +243,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {
@@ -287,7 +287,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {
@@ -331,7 +331,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {
@@ -352,7 +352,14 @@ public class SingleMapBlock
             Boolean match;
             try {
                 // assuming maps with indeterminate keys are not supported
-                match = (Boolean) mapBlock.keyBlockNativeEquals.invokeExact(mapBlock.getRawKeyBlock(), offset / 2 + keyPosition, nativeValue);
+                Block rawKeyBlock = mapBlock.getRawKeyBlock();
+
+                if (rawKeyBlock.getSliceLength(offset / 2 + keyPosition) != nativeValue.length()) {
+                    match = false;
+                }
+                else {
+                    match = rawKeyBlock.bytesEqual(offset / 2 + keyPosition, 0, nativeValue, 0, nativeValue.length());
+                }
             }
             catch (Throwable throwable) {
                 throw handleThrowable(throwable);
@@ -375,7 +382,7 @@ public class SingleMapBlock
         }
 
         mapBlock.ensureHashTableLoaded();
-        int[] hashTable = mapBlock.getHashTables().get().get();
+        int[] hashTable = mapBlock.getHashTables().get();
 
         long hashCode;
         try {

@@ -58,6 +58,8 @@ import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.hive.BackgroundHiveSplitLoader.BucketSplitInfo.createBucketSplitInfo;
+import static com.facebook.presto.hive.BucketFunctionType.HIVE_COMPATIBLE;
+import static com.facebook.presto.hive.CacheQuotaScope.GLOBAL;
 import static com.facebook.presto.hive.HiveTestUtils.SESSION;
 import static com.facebook.presto.hive.HiveType.HIVE_INT;
 import static com.facebook.presto.hive.HiveType.HIVE_STRING;
@@ -97,7 +99,7 @@ public class TestBackgroundHiveSplitLoader
             new HiveColumnHandle("col1", HIVE_INT, INTEGER.getTypeSignature(), 0, ColumnType.REGULAR, Optional.empty()));
 
     private static final Optional<HiveBucketProperty> BUCKET_PROPERTY = Optional.of(
-            new HiveBucketProperty(ImmutableList.of("col1"), BUCKET_COUNT, ImmutableList.of()));
+            new HiveBucketProperty(ImmutableList.of("col1"), BUCKET_COUNT, ImmutableList.of(), HIVE_COMPATIBLE, Optional.empty()));
 
     private static final Table SIMPLE_TABLE = table(ImmutableList.of(), Optional.empty());
     private static final Table PARTITIONED_TABLE = table(PARTITION_COLUMNS, BUCKET_PROPERTY);
@@ -190,14 +192,13 @@ public class TestBackgroundHiveSplitLoader
 
     @Test
     public void testNoHangIfPartitionIsOffline()
-            throws Exception
     {
         BackgroundHiveSplitLoader backgroundHiveSplitLoader = backgroundHiveSplitLoaderOfflinePartitions();
         HiveSplitSource hiveSplitSource = hiveSplitSource(backgroundHiveSplitLoader);
         backgroundHiveSplitLoader.start(hiveSplitSource);
 
         assertThrows(RuntimeException.class, () -> drain(hiveSplitSource));
-        assertThrows(RuntimeException.class, () -> hiveSplitSource.isFinished());
+        assertThrows(RuntimeException.class, hiveSplitSource::isFinished);
     }
 
     @Test
@@ -241,7 +242,7 @@ public class TestBackgroundHiveSplitLoader
     {
         assertEquals(cachingDirectoryLister.getRequestCount(), 0);
 
-        int totalCount = 1000;
+        int totalCount = 50;
         CountDownLatch firstVisit = new CountDownLatch(1);
         List<Future<List<HiveSplit>>> futures = new ArrayList<>();
 
@@ -333,7 +334,8 @@ public class TestBackgroundHiveSplitLoader
                         new HivePartitionMetadata(
                                 new HivePartition(new SchemaTableName("testSchema", "table_name")),
                                 Optional.empty(),
-                                ImmutableMap.of()));
+                                ImmutableMap.of(),
+                                Optional.empty()));
 
         ConnectorSession connectorSession = new TestingConnectorSession(
                 new HiveSessionProperties(new HiveClientConfig().setMaxSplitSize(new DataSize(1.0, GIGABYTE)), new OrcFileWriterConfig(), new ParquetFileWriterConfig()).getSessionProperties());
@@ -359,7 +361,8 @@ public class TestBackgroundHiveSplitLoader
                 new HivePartitionMetadata(
                         new HivePartition(new SchemaTableName("testSchema", "table_name")),
                         Optional.empty(),
-                        ImmutableMap.of()));
+                        ImmutableMap.of(),
+                        Optional.empty()));
 
         ConnectorSession connectorSession = new TestingConnectorSession(
                 new HiveSessionProperties(
@@ -422,7 +425,8 @@ public class TestBackgroundHiveSplitLoader
                         return new HivePartitionMetadata(
                                 new HivePartition(new SchemaTableName("testSchema", "table_name")),
                                 Optional.empty(),
-                                ImmutableMap.of());
+                                ImmutableMap.of(),
+                                Optional.empty());
                     case 1:
                         throw new RuntimeException("OFFLINE");
                     default:
@@ -438,6 +442,8 @@ public class TestBackgroundHiveSplitLoader
                 SESSION,
                 SIMPLE_TABLE.getDatabaseName(),
                 SIMPLE_TABLE.getTableName(),
+                GLOBAL,
+                Optional.empty(),
                 1,
                 1,
                 new DataSize(32, MEGABYTE),

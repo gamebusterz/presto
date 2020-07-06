@@ -58,6 +58,7 @@ public class TestFeaturesConfig
                 .setJoinDistributionType(PARTITIONED)
                 .setJoinMaxBroadcastTableSize(null)
                 .setGroupedExecutionForAggregationEnabled(false)
+                .setGroupedExecutionForJoinEnabled(true)
                 .setGroupedExecutionForEligibleTableScansEnabled(false)
                 .setDynamicScheduleForGroupedExecutionEnabled(false)
                 .setRecoverableGroupedExecutionEnabled(false)
@@ -97,6 +98,7 @@ public class TestFeaturesConfig
                 .setIterativeOptimizerEnabled(true)
                 .setIterativeOptimizerTimeout(new Duration(3, MINUTES))
                 .setEnableStatsCalculator(true)
+                .setEnableStatsCollectionForTemporaryTable(false)
                 .setIgnoreStatsCalculatorFailures(true)
                 .setPrintStatsForNonJoinQuery(false)
                 .setDefaultFilterFactorEnabled(false)
@@ -133,7 +135,8 @@ public class TestFeaturesConfig
                 .setExperimentalFunctionsEnabled(false)
                 .setUseLegacyScheduler(true)
                 .setOptimizeCommonSubExpressions(true)
-                .setPreferDistributedUnion(true));
+                .setPreferDistributedUnion(true)
+                .setOptimizeNullsInJoin(false));
     }
 
     @Test
@@ -146,6 +149,7 @@ public class TestFeaturesConfig
                 .put("experimental.iterative-optimizer-enabled", "false")
                 .put("experimental.iterative-optimizer-timeout", "10s")
                 .put("experimental.enable-stats-calculator", "false")
+                .put("experimental.enable-stats-collection-for-temporary-table", "true")
                 .put("optimizer.ignore-stats-calculator-failures", "false")
                 .put("print-stats-for-non-join-query", "true")
                 .put("optimizer.default-filter-factor-enabled", "true")
@@ -159,6 +163,7 @@ public class TestFeaturesConfig
                 .put("join-distribution-type", "BROADCAST")
                 .put("join-max-broadcast-table-size", "42GB")
                 .put("grouped-execution-for-aggregation-enabled", "true")
+                .put("grouped-execution-for-join-enabled", "false")
                 .put("experimental.grouped-execution-for-eligible-table-scans-enabled", "true")
                 .put("dynamic-schedule-for-grouped-execution", "true")
                 .put("recoverable-grouped-execution-enabled", "true")
@@ -223,6 +228,7 @@ public class TestFeaturesConfig
                 .put("use-legacy-scheduler", "false")
                 .put("optimize-common-sub-expressions", "false")
                 .put("prefer-distributed-union", "false")
+                .put("optimize-nulls-in-join", "true")
                 .build();
 
         FeaturesConfig expected = new FeaturesConfig()
@@ -232,12 +238,14 @@ public class TestFeaturesConfig
                 .setIterativeOptimizerEnabled(false)
                 .setIterativeOptimizerTimeout(new Duration(10, SECONDS))
                 .setEnableStatsCalculator(false)
+                .setEnableStatsCollectionForTemporaryTable(true)
                 .setIgnoreStatsCalculatorFailures(false)
                 .setPrintStatsForNonJoinQuery(true)
                 .setDistributedIndexJoinsEnabled(true)
                 .setJoinDistributionType(BROADCAST)
                 .setJoinMaxBroadcastTableSize(new DataSize(42, GIGABYTE))
                 .setGroupedExecutionForAggregationEnabled(true)
+                .setGroupedExecutionForJoinEnabled(false)
                 .setGroupedExecutionForEligibleTableScansEnabled(true)
                 .setDynamicScheduleForGroupedExecutionEnabled(true)
                 .setRecoverableGroupedExecutionEnabled(true)
@@ -308,7 +316,8 @@ public class TestFeaturesConfig
                 .setExperimentalFunctionsEnabled(true)
                 .setUseLegacyScheduler(false)
                 .setOptimizeCommonSubExpressions(false)
-                .setPreferDistributedUnion(false);
+                .setPreferDistributedUnion(false)
+                .setOptimizeNullsInJoin(true);
         assertFullMapping(properties, expected);
     }
 

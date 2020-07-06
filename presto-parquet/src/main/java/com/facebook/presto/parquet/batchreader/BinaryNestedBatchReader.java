@@ -18,7 +18,7 @@ import com.facebook.presto.common.block.RunLengthEncodedBlock;
 import com.facebook.presto.common.block.VariableWidthBlock;
 import com.facebook.presto.parquet.RichColumnDescriptor;
 import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder;
-import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder.ReadChunk;
+import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder.ValueBuffer;
 import com.facebook.presto.parquet.reader.ColumnChunk;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -41,36 +41,36 @@ public class BinaryNestedBatchReader
             throws IOException
     {
         int maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
-        RepetitionLevelDecodingInfo repetitionLevelDecodingInfo = readRepetitionLevels(nextBatchSize);
-        DefinitionLevelDecodingInfo definitionLevelDecodingInfo = readDefinitionLevels(repetitionLevelDecodingInfo.getDLValuesDecoderInfos(), repetitionLevelDecodingInfo.getRepetitionLevels().length);
+        RepetitionLevelDecodingContext repetitionLevelDecodingContext = readRepetitionLevels(nextBatchSize);
+        DefinitionLevelDecodingContext definitionLevelDecodingContext = readDefinitionLevels(repetitionLevelDecodingContext.getDLValuesDecoderContexts(), repetitionLevelDecodingContext.getRepetitionLevels().length);
 
-        int[] definitionLevels = definitionLevelDecodingInfo.getDefinitionLevels();
+        int[] definitionLevels = definitionLevelDecodingContext.getDefinitionLevels();
         int newBatchSize = 0;
         int batchNonNullCount = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
             int nonNullCount = 0;
             int valueCount = 0;
-            for (int i = valuesDecoderInfo.getStart(); i < valuesDecoderInfo.getEnd(); i++) {
+            for (int i = valuesDecoderContext.getStart(); i < valuesDecoderContext.getEnd(); i++) {
                 nonNullCount += (definitionLevels[i] == maxDefinitionLevel ? 1 : 0);
                 valueCount += (definitionLevels[i] >= maxDefinitionLevel - 1 ? 1 : 0);
             }
             batchNonNullCount += nonNullCount;
             newBatchSize += valueCount;
-            valuesDecoderInfo.setNonNullCount(nonNullCount);
-            valuesDecoderInfo.setValueCount(valueCount);
+            valuesDecoderContext.setNonNullCount(nonNullCount);
+            valuesDecoderContext.setValueCount(valueCount);
         }
 
         if (batchNonNullCount == 0) {
             Block block = RunLengthEncodedBlock.create(field.getType(), null, newBatchSize);
-            return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingInfo.getRepetitionLevels());
+            return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingContext.getRepetitionLevels());
         }
 
-        List<ReadChunk> readChunkList = new ArrayList<>();
+        List<ValueBuffer> valueBuffers = new ArrayList<>();
         int bufferSize = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
-            ReadChunk readChunk = ((BinaryValuesDecoder) valuesDecoderInfo.getValuesDecoder()).readNext(valuesDecoderInfo.getNonNullCount());
-            bufferSize += readChunk.getBufferSize();
-            readChunkList.add(readChunk);
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
+            ValueBuffer valueBuffer = ((BinaryValuesDecoder) valuesDecoderContext.getValuesDecoder()).readNext(valuesDecoderContext.getNonNullCount());
+            bufferSize += valueBuffer.getBufferSize();
+            valueBuffers.add(valueBuffer);
         }
 
         byte[] byteBuffer = new byte[bufferSize];
@@ -78,19 +78,19 @@ public class BinaryNestedBatchReader
         int i = 0;
         int bufferIndex = 0;
         int offsetIndex = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
-            ReadChunk readChunk = readChunkList.get(i);
-            bufferIndex = ((BinaryValuesDecoder) valuesDecoderInfo.getValuesDecoder()).readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, readChunk);
-            offsetIndex += valuesDecoderInfo.getValueCount();
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
+            ValueBuffer value = valueBuffers.get(i);
+            bufferIndex = ((BinaryValuesDecoder) valuesDecoderContext.getValuesDecoder()).readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, value);
+            offsetIndex += valuesDecoderContext.getValueCount();
             i++;
         }
 
         boolean[] isNull = new boolean[newBatchSize];
         int offset = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
-            int destinationIndex = offset + valuesDecoderInfo.getValueCount() - 1;
-            int sourceIndex = offset + valuesDecoderInfo.getNonNullCount() - 1;
-            int definitionLevelIndex = valuesDecoderInfo.getEnd() - 1;
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
+            int destinationIndex = offset + valuesDecoderContext.getValueCount() - 1;
+            int sourceIndex = offset + valuesDecoderContext.getNonNullCount() - 1;
+            int definitionLevelIndex = valuesDecoderContext.getEnd() - 1;
 
             offsets[destinationIndex + 1] = offsets[sourceIndex + 1];
             while (destinationIndex >= offset) {
@@ -104,13 +104,13 @@ public class BinaryNestedBatchReader
                 }
                 definitionLevelIndex--;
             }
-            offset += valuesDecoderInfo.getValueCount();
+            offset += valuesDecoderContext.getValueCount();
         }
 
         Slice buffer = Slices.wrappedBuffer(byteBuffer, 0, bufferSize);
         boolean hasNoNull = batchNonNullCount == newBatchSize;
         Block block = new VariableWidthBlock(newBatchSize, buffer, offsets, hasNoNull ? Optional.empty() : Optional.of(isNull));
-        return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingInfo.getRepetitionLevels());
+        return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingContext.getRepetitionLevels());
     }
 
     @Override
@@ -118,28 +118,28 @@ public class BinaryNestedBatchReader
             throws IOException
     {
         int maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
-        RepetitionLevelDecodingInfo repetitionLevelDecodingInfo = readRepetitionLevels(nextBatchSize);
+        RepetitionLevelDecodingContext repetitionLevelDecodingContext = readRepetitionLevels(nextBatchSize);
 
-        DefinitionLevelDecodingInfo definitionLevelDecodingInfo = readDefinitionLevels(repetitionLevelDecodingInfo.getDLValuesDecoderInfos(), repetitionLevelDecodingInfo.getRepetitionLevels().length);
+        DefinitionLevelDecodingContext definitionLevelDecodingContext = readDefinitionLevels(repetitionLevelDecodingContext.getDLValuesDecoderContexts(), repetitionLevelDecodingContext.getRepetitionLevels().length);
 
-        int[] definitionLevels = definitionLevelDecodingInfo.getDefinitionLevels();
+        int[] definitionLevels = definitionLevelDecodingContext.getDefinitionLevels();
         int newBatchSize = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
             int valueCount = 0;
-            for (int i = valuesDecoderInfo.getStart(); i < valuesDecoderInfo.getEnd(); i++) {
+            for (int i = valuesDecoderContext.getStart(); i < valuesDecoderContext.getEnd(); i++) {
                 valueCount += (definitionLevels[i] == maxDefinitionLevel ? 1 : 0);
             }
             newBatchSize += valueCount;
-            valuesDecoderInfo.setNonNullCount(valueCount);
-            valuesDecoderInfo.setValueCount(valueCount);
+            valuesDecoderContext.setNonNullCount(valueCount);
+            valuesDecoderContext.setValueCount(valueCount);
         }
 
-        List<ReadChunk> readChunkList = new ArrayList<>();
+        List<ValueBuffer> valueBuffers = new ArrayList<>();
         int bufferSize = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
-            ReadChunk readChunk = ((BinaryValuesDecoder) valuesDecoderInfo.getValuesDecoder()).readNext(valuesDecoderInfo.getNonNullCount());
-            bufferSize += readChunk.getBufferSize();
-            readChunkList.add(readChunk);
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
+            ValueBuffer valueBuffer = ((BinaryValuesDecoder) valuesDecoderContext.getValuesDecoder()).readNext(valuesDecoderContext.getNonNullCount());
+            bufferSize += valueBuffer.getBufferSize();
+            valueBuffers.add(valueBuffer);
         }
 
         byte[] byteBuffer = new byte[bufferSize];
@@ -147,34 +147,36 @@ public class BinaryNestedBatchReader
         int i = 0;
         int bufferIndex = 0;
         int offsetIndex = 0;
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
-            ReadChunk readChunk = readChunkList.get(i);
-            bufferIndex = ((BinaryValuesDecoder) valuesDecoderInfo.getValuesDecoder()).readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, readChunk);
-            offsetIndex += valuesDecoderInfo.getValueCount();
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
+            ValueBuffer value = valueBuffers.get(i);
+            bufferIndex = ((BinaryValuesDecoder) valuesDecoderContext.getValuesDecoder()).readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, value);
+            offsetIndex += valuesDecoderContext.getValueCount();
             i++;
         }
 
         Slice buffer = Slices.wrappedBuffer(byteBuffer, 0, bufferSize);
         Block block = new VariableWidthBlock(newBatchSize, buffer, offsets, Optional.empty());
-        return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingInfo.getRepetitionLevels());
+        return new ColumnChunk(block, definitionLevels, repetitionLevelDecodingContext.getRepetitionLevels());
     }
 
     @Override
-    protected void skip(int skipSize)
+    protected void seek()
             throws IOException
     {
+        if (readOffset == 0) {
+            return;
+        }
         int maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
+        RepetitionLevelDecodingContext repetitionLevelDecodingContext = readRepetitionLevels(readOffset);
+        DefinitionLevelDecodingContext definitionLevelDecodingContext = readDefinitionLevels(repetitionLevelDecodingContext.getDLValuesDecoderContexts(), repetitionLevelDecodingContext.getRepetitionLevels().length);
 
-        RepetitionLevelDecodingInfo repetitionLevelDecodingInfo = readRepetitionLevels(skipSize);
-        DefinitionLevelDecodingInfo definitionLevelDecodingInfo = readDefinitionLevels(repetitionLevelDecodingInfo.getDLValuesDecoderInfos(), repetitionLevelDecodingInfo.getRepetitionLevels().length);
-
-        int[] definitionLevels = definitionLevelDecodingInfo.getDefinitionLevels();
-        for (ValuesDecoderInfo valuesDecoderInfo : definitionLevelDecodingInfo.getValuesDecoderInfos()) {
+        int[] definitionLevels = definitionLevelDecodingContext.getDefinitionLevels();
+        for (ValuesDecoderContext valuesDecoderContext : definitionLevelDecodingContext.getValuesDecoderContexts()) {
             int valueCount = 0;
-            for (int i = valuesDecoderInfo.getStart(); i < valuesDecoderInfo.getEnd(); i++) {
+            for (int i = valuesDecoderContext.getStart(); i < valuesDecoderContext.getEnd(); i++) {
                 valueCount += (definitionLevels[i] == maxDefinitionLevel ? 1 : 0);
             }
-            BinaryValuesDecoder binaryValuesDecoder = ((BinaryValuesDecoder) valuesDecoderInfo.getValuesDecoder());
+            BinaryValuesDecoder binaryValuesDecoder = ((BinaryValuesDecoder) valuesDecoderContext.getValuesDecoder());
             binaryValuesDecoder.skip(valueCount);
         }
     }

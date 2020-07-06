@@ -34,8 +34,6 @@ import com.google.common.annotations.VisibleForTesting;
 import io.airlift.slice.SliceOutput;
 import org.openjdk.jol.info.ClassLayout;
 
-import java.util.Optional;
-
 import static com.facebook.presto.array.Arrays.ExpansionFactor.LARGE;
 import static com.facebook.presto.array.Arrays.ExpansionFactor.SMALL;
 import static com.facebook.presto.array.Arrays.ExpansionOption.NONE;
@@ -43,6 +41,7 @@ import static com.facebook.presto.array.Arrays.ExpansionOption.PRESERVE;
 import static com.facebook.presto.array.Arrays.ensureCapacity;
 import static com.facebook.presto.operator.MoreByteArrays.setInts;
 import static com.facebook.presto.operator.UncheckedByteArrays.setIntUnchecked;
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.SizeOf.SIZE_OF_BYTE;
 import static io.airlift.slice.SizeOf.SIZE_OF_INT;
 import static java.util.Objects.requireNonNull;
@@ -253,16 +252,19 @@ public class MapBlockEncodingBuffer
     @Override
     public String toString()
     {
-        StringBuilder sb = new StringBuilder(getClass().getSimpleName()).append("{");
-        sb.append("hashTablesBufferCapacity=").append(hashTablesBuffer == null ? 0 : hashTablesBuffer.length).append(",");
-        sb.append("hashTableBufferIndex=").append(hashTableBufferIndex).append(",");
-        sb.append("offsetsBufferCapacity=").append(offsetsBuffer == null ? 0 : offsetsBuffer.length).append(",");
-        sb.append("offsetsBufferIndex=").append(offsetsBufferIndex).append(",");
-        sb.append("offsetsCapacity=").append(offsets == null ? 0 : offsets.length).append(",");
-        sb.append("lastOffset=").append(lastOffset).append(",");
-        sb.append("keyBuffers=").append(keyBuffers.toString()).append(",");
-        sb.append("valueBuffers=").append(valueBuffers.toString()).append("}");
-        return sb.toString();
+        return toStringHelper(this)
+                .add("super", super.toString())
+                .add("estimatedHashTableBufferMaxCapacity", estimatedHashTableBufferMaxCapacity)
+                .add("hashTablesBufferCapacity", hashTablesBuffer == null ? 0 : hashTablesBuffer.length)
+                .add("hashTableBufferIndex", hashTableBufferIndex)
+                .add("estimatedOffsetBufferMaxCapacity", estimatedOffsetBufferMaxCapacity)
+                .add("offsetsBufferCapacity", offsetsBuffer == null ? 0 : offsetsBuffer.length)
+                .add("offsetsBufferIndex", offsetsBufferIndex)
+                .add("offsetsCapacity", offsets == null ? 0 : offsets.length)
+                .add("lastOffset", lastOffset)
+                .add("keyBuffers", keyBuffers)
+                .add("valueBuffers", valueBuffers)
+                .toString();
     }
 
     @Override
@@ -276,8 +278,8 @@ public class MapBlockEncodingBuffer
 
         double targetBufferSize = partitionBufferCapacity * decodedBlockPageSizeFraction;
 
-        if (!noHashTables && columnarMap.getHashTables().isPresent()) {
-            estimatedHashTableBufferMaxCapacity = (int) (targetBufferSize * columnarMap.getHashTables().get().length / columnarMap.getRetainedSizeInBytes());
+        if (!noHashTables && columnarMap.getHashTables() != null) {
+            estimatedHashTableBufferMaxCapacity = (int) (targetBufferSize * columnarMap.getHashTables().length / columnarMap.getRetainedSizeInBytes());
             targetBufferSize -= estimatedHashTableBufferMaxCapacity;
         }
         else {
@@ -378,8 +380,8 @@ public class MapBlockEncodingBuffer
             return;
         }
 
-        Optional<int[]> hashTables = columnarMap.getHashTables();
-        if (!hashTables.isPresent()) {
+        int[] hashTables = columnarMap.getHashTables();
+        if (hashTables == null) {
             noHashTables = true;
             hashTableBufferIndex = 0;
             return;
@@ -399,7 +401,7 @@ public class MapBlockEncodingBuffer
             hashTableBufferIndex = setInts(
                     hashTablesBuffer,
                     hashTableBufferIndex,
-                    hashTables.get(),
+                    hashTables,
                     beginOffset * HASH_MULTIPLIER,
                     (endOffset - beginOffset) * HASH_MULTIPLIER);
         }

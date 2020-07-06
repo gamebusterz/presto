@@ -14,6 +14,7 @@
 package com.facebook.presto.spark;
 
 import com.facebook.airlift.bootstrap.LifeCycleManager;
+import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.log.Logging;
 import com.facebook.presto.Session;
 import com.facebook.presto.connector.ConnectorManager;
@@ -40,6 +41,7 @@ import com.facebook.presto.server.PluginManager;
 import com.facebook.presto.spark.PrestoSparkQueryExecutionFactory.PrestoSparkQueryExecution;
 import com.facebook.presto.spark.classloader_interface.IPrestoSparkQueryExecutionFactory;
 import com.facebook.presto.spark.classloader_interface.IPrestoSparkTaskExecutorFactory;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkConfInitializer;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkSession;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskExecutorFactoryProvider;
 import com.facebook.presto.spi.Plugin;
@@ -80,6 +82,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static com.facebook.airlift.log.Level.ERROR;
 import static com.facebook.airlift.log.Level.WARN;
+import static com.facebook.presto.spark.PrestoSparkSettingsRequirements.SPARK_EXECUTOR_CORES_PROPERTY;
+import static com.facebook.presto.spark.PrestoSparkSettingsRequirements.SPARK_TASK_CPUS_PROPERTY;
+import static com.facebook.presto.spark.classloader_interface.SparkProcessType.DRIVER;
 import static com.facebook.presto.testing.MaterializedResult.DEFAULT_PRECISION;
 import static com.facebook.presto.testing.TestingSession.TESTING_CATALOG;
 import static com.facebook.presto.testing.TestingSession.createBogusTestingCatalog;
@@ -94,14 +99,19 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.tpch.TpchTable.getTables;
+import static io.airlift.units.Duration.nanosSince;
 import static java.lang.String.format;
 import static java.nio.file.Files.createTempDirectory;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class PrestoSparkQueryRunner
         implements QueryRunner
 {
+    private static final Logger log = Logger.get(PrestoSparkQueryRunner.class);
+
     private static final int NODE_COUNT = 4;
 
     private static final Map<String, PrestoSparkQueryRunner> instances = new ConcurrentHashMap<>();
@@ -144,8 +154,43 @@ public class PrestoSparkQueryRunner
         if (!metastore.getDatabase("tpch").isPresent()) {
             metastore.createDatabase(createDatabaseMetastoreObject("tpch"));
             copyTpchTables(queryRunner, "tpch", TINY_SCHEMA_NAME, queryRunner.getDefaultSession(), tables);
+            copyTpchTablesBucketed(queryRunner, "tpch", TINY_SCHEMA_NAME, queryRunner.getDefaultSession(), tables);
         }
         return queryRunner;
+    }
+
+    public static void copyTpchTablesBucketed(
+            QueryRunner queryRunner,
+            String sourceCatalog,
+            String sourceSchema,
+            Session session,
+            Iterable<TpchTable<?>> tables)
+    {
+        log.info("Loading data from %s.%s...", sourceCatalog, sourceSchema);
+        long startTime = System.nanoTime();
+        for (TpchTable<?> table : tables) {
+            copyTableBucketed(queryRunner, new QualifiedObjectName(sourceCatalog, sourceSchema, table.getTableName().toLowerCase(ENGLISH)), session);
+        }
+        log.info("Loading from %s.%s complete in %s", sourceCatalog, sourceSchema, nanosSince(startTime).toString(SECONDS));
+    }
+
+    private static void copyTableBucketed(QueryRunner queryRunner, QualifiedObjectName table, Session session)
+    {
+        long start = System.nanoTime();
+        String tableName = table.getObjectName() + "_bucketed";
+        log.info("Running import for %s", tableName);
+        String sql;
+        switch (tableName) {
+            case "lineitem_bucketed":
+            case "orders_bucketed":
+                sql = format("CREATE TABLE %s WITH (bucketed_by=array['orderkey'], bucket_count=11) AS SELECT * FROM %s", tableName, table);
+                break;
+            default:
+                log.info("Skipping %s", tableName);
+                return;
+        }
+        long rows = (Long) queryRunner.execute(session, sql).getMaterializedRows().get(0).getField(0);
+        log.info("Imported %s rows for %s in %s", rows, tableName, nanosSince(start).convertToMostSuccinctTimeUnit());
     }
 
     public PrestoSparkQueryRunner(String defaultCatalog)
@@ -153,6 +198,7 @@ public class PrestoSparkQueryRunner
         setupLogging();
 
         PrestoSparkInjectorFactory injectorFactory = new PrestoSparkInjectorFactory(
+                DRIVER,
                 ImmutableMap.of(
                         "presto.version", "testversion",
                         "query.hash-partition-count", Integer.toString(NODE_COUNT * 2),
@@ -186,12 +232,7 @@ public class PrestoSparkQueryRunner
 
         // Install tpch Plugin
         pluginManager.installPlugin(new TpchPlugin());
-        connectorManager.createConnection(
-                "tpch",
-                "tpch",
-                ImmutableMap.of(
-                        // TODO: partitioned sources are not supported by Presto on Spark yet
-                        "tpch.partitioning-enabled", "false"));
+        connectorManager.createConnection("tpch", "tpch", ImmutableMap.of());
 
         // Install Hive Plugin
         File baseDir;
@@ -477,7 +518,10 @@ public class PrestoSparkQueryRunner
                     SparkConf sparkConfiguration = new SparkConf()
                             .setMaster(format("local[%s]", NODE_COUNT))
                             .setAppName("presto")
-                            .set("spark.driver.host", "localhost");
+                            .set("spark.driver.host", "localhost")
+                            .set(SPARK_EXECUTOR_CORES_PROPERTY, "4")
+                            .set(SPARK_TASK_CPUS_PROPERTY, "4");
+                    PrestoSparkConfInitializer.initialize(sparkConfiguration);
                     sparkContext = new SparkContext(sparkConfiguration);
                 }
                 referenceCount++;

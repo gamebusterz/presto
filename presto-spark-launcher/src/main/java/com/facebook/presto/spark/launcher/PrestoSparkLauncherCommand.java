@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.spark.launcher;
 
+import com.facebook.presto.spark.classloader_interface.PrestoSparkConfInitializer;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.airline.Command;
 import io.airlift.airline.HelpOption;
@@ -44,6 +45,7 @@ public class PrestoSparkLauncherCommand
     {
         SparkConf sparkConfiguration = new SparkConf()
                 .setAppName("Presto");
+        PrestoSparkConfInitializer.initialize(sparkConfiguration);
         SparkContext sparkContext = new SparkContext(sparkConfiguration);
 
         TargzBasedPackageSupplier packageSupplier = new TargzBasedPackageSupplier(new File(clientOptions.packagePath));
@@ -57,7 +59,8 @@ public class PrestoSparkLauncherCommand
 
         String query = readFileUtf8(checkFile(new File(clientOptions.file)));
 
-        PrestoSparkRunner runner = new PrestoSparkRunner(distribution);
-        runner.run(clientOptions.catalog, clientOptions.schema, query, ImmutableMap.of(), ImmutableMap.of());
+        try (PrestoSparkRunner runner = new PrestoSparkRunner(distribution)) {
+            runner.run(clientOptions.catalog, clientOptions.schema, query, ImmutableMap.of(), ImmutableMap.of());
+        }
     }
 }

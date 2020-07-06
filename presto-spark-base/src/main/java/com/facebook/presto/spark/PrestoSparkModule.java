@@ -37,6 +37,7 @@ import com.facebook.presto.cost.StatsCalculatorModule;
 import com.facebook.presto.cost.TaskCountEstimator;
 import com.facebook.presto.event.QueryMonitor;
 import com.facebook.presto.event.QueryMonitorConfig;
+import com.facebook.presto.event.SplitMonitor;
 import com.facebook.presto.execution.DataDefinitionTask;
 import com.facebook.presto.execution.ExecutionFailureInfo;
 import com.facebook.presto.execution.ExplainAnalyzeContext;
@@ -47,10 +48,14 @@ import com.facebook.presto.execution.QueryPreparer;
 import com.facebook.presto.execution.StageInfo;
 import com.facebook.presto.execution.TaskManager;
 import com.facebook.presto.execution.TaskManagerConfig;
+import com.facebook.presto.execution.TaskSource;
+import com.facebook.presto.execution.executor.MultilevelSplitQueue;
+import com.facebook.presto.execution.executor.TaskExecutor;
 import com.facebook.presto.execution.resourceGroups.InternalResourceGroupManager;
 import com.facebook.presto.execution.resourceGroups.LegacyResourceGroupConfigurationManager;
 import com.facebook.presto.execution.resourceGroups.ResourceGroupManager;
 import com.facebook.presto.execution.scheduler.NodeSchedulerConfig;
+import com.facebook.presto.execution.warnings.WarningCollectorConfig;
 import com.facebook.presto.index.IndexManager;
 import com.facebook.presto.memory.MemoryManagerConfig;
 import com.facebook.presto.memory.NodeMemoryConfig;
@@ -82,6 +87,7 @@ import com.facebook.presto.server.QuerySessionSupplier;
 import com.facebook.presto.server.ServerConfig;
 import com.facebook.presto.server.SessionPropertyDefaults;
 import com.facebook.presto.server.security.ServerSecurityModule;
+import com.facebook.presto.spark.classloader_interface.SparkProcessType;
 import com.facebook.presto.spark.execution.PrestoSparkExecutionExceptionFactory;
 import com.facebook.presto.spark.execution.PrestoSparkTaskExecutorFactory;
 import com.facebook.presto.spark.node.PrestoSparkInternalNodeManager;
@@ -139,6 +145,7 @@ import com.facebook.presto.transaction.TransactionManager;
 import com.facebook.presto.transaction.TransactionManagerConfig;
 import com.facebook.presto.type.TypeDeserializer;
 import com.facebook.presto.type.TypeRegistry;
+import com.facebook.presto.version.EmbedVersion;
 import com.google.inject.Binder;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
@@ -161,6 +168,7 @@ import static com.facebook.airlift.json.JsonBinder.jsonBinder;
 import static com.facebook.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static com.google.inject.multibindings.MapBinder.newMapBinder;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
@@ -168,6 +176,13 @@ import static org.weakref.jmx.guice.ExportBinder.newExporter;
 public class PrestoSparkModule
         extends AbstractConfigurationAwareModule
 {
+    private final SparkProcessType sparkProcessType;
+
+    public PrestoSparkModule(SparkProcessType sparkProcessType)
+    {
+        this.sparkProcessType = requireNonNull(sparkProcessType, "sparkProcessType is null");
+    }
+
     @Override
     protected void setup(Binder binder)
     {
@@ -182,6 +197,7 @@ public class PrestoSparkModule
         configBinder(binder).bindConfig(TaskManagerConfig.class);
         configBinder(binder).bindConfig(TransactionManagerConfig.class);
         configBinder(binder).bindConfig(NodeMemoryConfig.class);
+        configBinder(binder).bindConfig(WarningCollectorConfig.class);
         configBinder(binder).bindConfig(NodeSpillConfig.class);
         configBinder(binder).bindConfig(CompilerConfig.class);
         configBinder(binder).bindConfig(SqlEnvironmentConfig.class);
@@ -192,6 +208,7 @@ public class PrestoSparkModule
         jsonCodecBinder(binder).bindJsonCodec(ViewDefinition.class);
         jsonCodecBinder(binder).bindJsonCodec(TaskStats.class);
         jsonCodecBinder(binder).bindJsonCodec(PrestoSparkTaskDescriptor.class);
+        jsonCodecBinder(binder).bindJsonCodec(TaskSource.class);
         jsonCodecBinder(binder).bindJsonCodec(TableCommitContext.class);
         jsonCodecBinder(binder).bindJsonCodec(ExplainAnalyzeContext.class);
         jsonCodecBinder(binder).bindJsonCodec(ExecutionFailureInfo.class);
@@ -279,6 +296,11 @@ public class PrestoSparkModule
         binder.bind(ExecutorService.class).toInstance(executor);
         binder.bind(ScheduledExecutorService.class).toInstance(newScheduledThreadPool(0, daemonThreadsNamed("presto-spark-scheduled-executor-%s")));
 
+        // task executor
+        binder.bind(EmbedVersion.class).in(Scopes.SINGLETON);
+        binder.bind(MultilevelSplitQueue.class).in(Scopes.SINGLETON);
+        binder.bind(TaskExecutor.class).in(Scopes.SINGLETON);
+
         // data stream provider
         binder.bind(PageSourceManager.class).in(Scopes.SINGLETON);
         binder.bind(PageSourceProvider.class).to(PageSourceManager.class).in(Scopes.SINGLETON);
@@ -321,9 +343,10 @@ public class PrestoSparkModule
         binder.bind(PartitioningSpillerFactory.class).to(GenericPartitioningSpillerFactory.class).in(Scopes.SINGLETON);
         binder.bind(SpillerStats.class).in(Scopes.SINGLETON);
 
-        // query monitoring
+        // monitoring
         binder.bind(QueryMonitor.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(QueryMonitorConfig.class);
+        binder.bind(SplitMonitor.class).in(Scopes.SINGLETON);
 
         // Determine the NodeVersion
         ServerConfig serverConfig = buildConfigObject(ServerConfig.class);
@@ -369,6 +392,7 @@ public class PrestoSparkModule
         install(new ServerSecurityModule());
 
         // spark specific
+        binder.bind(SparkProcessType.class).toInstance(sparkProcessType);
         binder.bind(PrestoSparkExecutionExceptionFactory.class).in(Scopes.SINGLETON);
         binder.bind(PrestoSparkSettingsRequirements.class).in(Scopes.SINGLETON);
         binder.bind(PrestoSparkQueryPlanner.class).in(Scopes.SINGLETON);

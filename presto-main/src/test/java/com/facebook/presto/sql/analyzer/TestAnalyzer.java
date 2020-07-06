@@ -547,7 +547,8 @@ public class TestAnalyzer
                 new TaskManagerConfig(),
                 new MemoryManagerConfig(),
                 new FeaturesConfig().setMaxGroupingSets(2048),
-                new NodeMemoryConfig()))).build();
+                new NodeMemoryConfig(),
+                new WarningCollectorConfig()))).build();
         analyze(session, "SELECT a, b, c, d, e, f, g, h, i, j, k, SUM(l)" +
                 "FROM (VALUES (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))\n" +
                 "t (a, b, c, d, e, f, g, h, i, j, k, l)\n" +
@@ -1070,6 +1071,19 @@ public class TestAnalyzer
         PrestoWarning warning = warnings.get(0);
         assertEquals(warning.getWarningCode(), PERFORMANCE_WARNING.toWarningCode());
         assertTrue(warning.getMessage().startsWith("UNION DISTINCT"));
+    }
+
+    @Test
+    public void testCountDistinctPerformanceWarning()
+    {
+        WarningCollector warningCollector = analyzeWithWarnings("SELECT COUNT(DISTINCT a) FROM t1 GROUP BY b");
+        List<PrestoWarning> warnings = warningCollector.getWarnings();
+        assertEquals(warnings.size(), 1);
+
+        // Ensure warning is the performance warning we expect
+        PrestoWarning warning = warnings.get(0);
+        assertEquals(warning.getWarningCode(), PERFORMANCE_WARNING.toWarningCode());
+        assertTrue(warning.getMessage().contains("COUNT(DISTINCT xxx)"));
     }
 
     @Test

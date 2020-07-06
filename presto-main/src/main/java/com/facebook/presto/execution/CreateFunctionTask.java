@@ -18,10 +18,10 @@ import com.facebook.presto.common.type.TypeSignature;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.function.Parameter;
 import com.facebook.presto.spi.function.RoutineCharacteristics;
 import com.facebook.presto.spi.function.SqlFunctionHandle;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
-import com.facebook.presto.spi.function.SqlParameter;
 import com.facebook.presto.sql.analyzer.Analysis;
 import com.facebook.presto.sql.analyzer.Analyzer;
 import com.facebook.presto.sql.parser.SqlParser;
@@ -41,7 +41,6 @@ import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.sql.SqlFormatter.formatSql;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
-import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 public class CreateFunctionTask
@@ -84,13 +83,13 @@ public class CreateFunctionTask
     private SqlInvokedFunction createSqlInvokedFunction(CreateFunction statement)
     {
         QualifiedFunctionName functionName = qualifyFunctionName(statement.getFunctionName());
-        List<SqlParameter> parameters = statement.getParameters().stream()
-                .map(parameter -> new SqlParameter(parameter.getName().toString().toLowerCase(ENGLISH), parseTypeSignature(parameter.getType())))
+        List<Parameter> parameters = statement.getParameters().stream()
+                .map(parameter -> new Parameter(parameter.getName().toString(), parseTypeSignature(parameter.getType())))
                 .collect(toImmutableList());
         TypeSignature returnType = parseTypeSignature(statement.getReturnType());
         String description = statement.getComment().orElse("");
         RoutineCharacteristics routineCharacteristics = RoutineCharacteristics.builder()
-                .setLanguage(RoutineCharacteristics.Language.valueOf(statement.getCharacteristics().getLanguage().name()))
+                .setLanguage(new RoutineCharacteristics.Language(statement.getCharacteristics().getLanguage().getLanguage()))
                 .setDeterminism(RoutineCharacteristics.Determinism.valueOf(statement.getCharacteristics().getDeterminism().name()))
                 .setNullCallClause(RoutineCharacteristics.NullCallClause.valueOf(statement.getCharacteristics().getNullCallClause().name()))
                 .build();

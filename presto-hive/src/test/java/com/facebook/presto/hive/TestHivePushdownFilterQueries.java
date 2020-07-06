@@ -104,9 +104,6 @@ public class TestHivePushdownFilterQueries
     {
         DistributedQueryRunner queryRunner = HiveQueryRunner.createQueryRunner(getTables(),
                 ImmutableMap.of("experimental.pushdown-subfields-enabled", "true"),
-                // TODO: enable failure detector.  Currently this test has a ton of major GC activity on travis,
-                //  and the failure detector may make the test run longer
-                ImmutableMap.of("failure-detector.enabled", "false"),
                 "sql-standard",
                 ImmutableMap.of("hive.pushdown-filter-enabled", "true"),
                 Optional.empty());
@@ -893,6 +890,36 @@ public class TestHivePushdownFilterQueries
         assertQuery("SELECT * FROM test_struct_add_column", "SELECT (1, 2, 3) UNION ALL SELECT (1, 2, null)");
         assertQuery("SELECT x.a FROM test_struct_add_column", "SELECT 1 UNION ALL SELECT 1");
         assertQuery("SELECT count(*) FROM test_struct_add_column where x.c = 1", "SELECT 0");
+    }
+
+    @Test
+    public void testUpperCaseStructFields()
+            throws Exception
+    {
+        assertUpdate("CREATE TABLE test_struct_with_uppercase_field(field0) WITH (FORMAT = 'DWRF') AS " +
+                "SELECT CAST((1, 1) AS ROW(SUBFIELDCAP BIGINT, subfieldsmall BIGINT))", 1);
+
+        try {
+            assertQuery("SELECT * FROM test_struct_with_uppercase_field", "SELECT (CAST(1 AS BIGINT), CAST(1 AS BIGINT))");
+            assertQuery("SELECT field0.SUBFIELDCAP FROM test_struct_with_uppercase_field", "SELECT CAST(1 AS BIGINT)");
+            assertQuery("SELECT field0.subfieldcap FROM test_struct_with_uppercase_field", "SELECT CAST(1 AS BIGINT)");
+
+            // delete the file written by Presto and corresponding crc file
+            Path prestoFile = getOnlyPath("test_struct_with_uppercase_field");
+            Files.delete(prestoFile);
+            Files.deleteIfExists(prestoFile.getParent().resolve("." + prestoFile.getFileName() + ".crc"));
+
+            // copy the file written by Spark
+            Path sparkFile = Paths.get(this.getClass().getClassLoader().getResource("struct_with_uppercase_field.dwrf").toURI());
+            Files.copy(sparkFile, prestoFile);
+
+            assertQuery("SELECT * FROM test_struct_with_uppercase_field", "SELECT (CAST(1 AS BIGINT), CAST(1 AS BIGINT))");
+            assertQuery("SELECT field0.SUBFIELDCAP FROM test_struct_with_uppercase_field", "SELECT CAST(1 AS BIGINT)");
+            assertQuery("SELECT field0.subfieldcap FROM test_struct_with_uppercase_field", "SELECT CAST(1 AS BIGINT)");
+        }
+        finally {
+            assertUpdate("DROP TABLE test_struct_with_uppercase_field");
+        }
     }
 
     @Test

@@ -43,8 +43,10 @@ import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Streams;
 import io.airlift.slice.BasicSliceInput;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.CoordinateSequence;
 import org.locationtech.jts.geom.Geometry;
@@ -105,6 +107,7 @@ import static com.facebook.presto.plugin.geospatial.GeometryType.GEOMETRY;
 import static com.facebook.presto.plugin.geospatial.GeometryType.GEOMETRY_TYPE_NAME;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.lang.Double.isInfinite;
@@ -412,7 +415,7 @@ public final class GeoFunctions
     {
         try {
             Geometry geometry = deserialize(input);
-            return utf8Slice(getGeometryInvalidReason(geometry));
+            return getGeometryInvalidReason(geometry).map(Slices::utf8Slice).orElse(null);
         }
         catch (PrestoException e) {
             if (e.getCause() instanceof TopologyException) {
@@ -1149,6 +1152,21 @@ public final class GeoFunctions
     public static Slice stGeometryType(@SqlType(GEOMETRY_TYPE_NAME) Slice input)
     {
         return EsriGeometrySerde.getGeometryType(input).standardName();
+    }
+
+    @Description("Recursively flattens GeometryCollections")
+    @ScalarFunction("flatten_geometry_collections")
+    @SqlType("array(" + GEOMETRY_TYPE_NAME + ")")
+    public static Block flattenGeometryCollections(@SqlType(GEOMETRY_TYPE_NAME) Slice input)
+    {
+        OGCGeometry geometry = EsriGeometrySerde.deserialize(input);
+        List<OGCGeometry> components = Streams.stream(
+                flattenCollection(geometry)).collect(toImmutableList());
+        BlockBuilder blockBuilder = GEOMETRY.createBlockBuilder(null, components.size());
+        for (OGCGeometry component : components) {
+            GEOMETRY.writeSlice(blockBuilder, EsriGeometrySerde.serialize(component));
+        }
+        return blockBuilder.build();
     }
 
     @ScalarFunction

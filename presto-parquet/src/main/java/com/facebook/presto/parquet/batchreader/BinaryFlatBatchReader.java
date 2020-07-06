@@ -25,7 +25,7 @@ import com.facebook.presto.parquet.RichColumnDescriptor;
 import com.facebook.presto.parquet.batchreader.decoders.Decoders.FlatDecoders;
 import com.facebook.presto.parquet.batchreader.decoders.FlatDefinitionLevelDecoder;
 import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder;
-import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder.ReadChunk;
+import com.facebook.presto.parquet.batchreader.decoders.ValuesDecoder.BinaryValuesDecoder.ValueBuffer;
 import com.facebook.presto.parquet.batchreader.dictionary.Dictionaries;
 import com.facebook.presto.parquet.dictionary.Dictionary;
 import com.facebook.presto.parquet.reader.ColumnChunk;
@@ -33,7 +33,6 @@ import com.facebook.presto.parquet.reader.PageReader;
 import com.facebook.presto.spi.PrestoException;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import org.apache.parquet.Preconditions;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -75,7 +74,7 @@ public class BinaryFlatBatchReader
     @Override
     public void init(PageReader pageReader, Field field)
     {
-        Preconditions.checkState(!isInitialized(), "already initialized");
+        checkArgument(!isInitialized(), "Parquet batch reader already initialized");
         this.pageReader = requireNonNull(pageReader, "pageReader is null");
         checkArgument(pageReader.getTotalValueCount() > 0, "page is empty");
         this.field = requireNonNull(field, "field is null");
@@ -98,10 +97,7 @@ public class BinaryFlatBatchReader
     {
         ColumnChunk columnChunk = null;
         try {
-            if (readOffset != 0) {
-                skip(readOffset);
-            }
-
+            seek();
             if (field.isRequired()) {
                 columnChunk = readWithoutNull();
             }
@@ -142,8 +138,8 @@ public class BinaryFlatBatchReader
     {
         boolean[] isNull = new boolean[nextBatchSize];
 
-        List<ReadChunk> readChunkList = new ArrayList<>();
-        List<ValuesDecoderInfo> valuesDecoderInfos = new ArrayList<>();
+        List<ValueBuffer> valueBuffers = new ArrayList<>();
+        List<ValuesDecoderContext> valuesDecoderContexts = new ArrayList<>();
         int bufferSize = 0;
 
         int totalNonNullCount = 0;
@@ -160,15 +156,14 @@ public class BinaryFlatBatchReader
             int nonNullCount = definitionLevelDecoder.readNext(isNull, startOffset, readChunkSize);
             totalNonNullCount += nonNullCount;
 
-            ReadChunk readChunk = valuesDecoder.readNext(nonNullCount);
+            ValueBuffer valueBuffer = valuesDecoder.readNext(nonNullCount);
+            bufferSize += valueBuffer.getBufferSize();
+            valueBuffers.add(valueBuffer);
 
-            bufferSize += readChunk.getBufferSize();
-            readChunkList.add(readChunk);
-
-            ValuesDecoderInfo<BinaryValuesDecoder> valuesDecoderInfo = new ValuesDecoderInfo(valuesDecoder, startOffset, startOffset + readChunkSize);
-            valuesDecoderInfo.setValueCount(readChunkSize);
-            valuesDecoderInfo.setNonNullCount(nonNullCount);
-            valuesDecoderInfos.add(valuesDecoderInfo);
+            ValuesDecoderContext<BinaryValuesDecoder> valuesDecoderContext = new ValuesDecoderContext(valuesDecoder, startOffset, startOffset + readChunkSize);
+            valuesDecoderContext.setValueCount(readChunkSize);
+            valuesDecoderContext.setNonNullCount(nonNullCount);
+            valuesDecoderContexts.add(valuesDecoderContext);
 
             startOffset += readChunkSize;
             remainingInBatch -= readChunkSize;
@@ -186,27 +181,27 @@ public class BinaryFlatBatchReader
         int i = 0;
         int bufferIndex = 0;
         int offsetIndex = 0;
-        for (ValuesDecoderInfo<BinaryValuesDecoder> valuesDecoderInfo : valuesDecoderInfos) {
-            BinaryValuesDecoder binaryValuesDecoder = valuesDecoderInfo.getValuesDecoder();
-            ReadChunk readChunk = readChunkList.get(i);
-            bufferIndex = binaryValuesDecoder.readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, readChunk);
-            offsetIndex += valuesDecoderInfo.getValueCount();
+        for (ValuesDecoderContext<BinaryValuesDecoder> valuesDecoderContext : valuesDecoderContexts) {
+            BinaryValuesDecoder binaryValuesDecoder = valuesDecoderContext.getValuesDecoder();
+            ValueBuffer value = valueBuffers.get(i);
+            bufferIndex = binaryValuesDecoder.readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, value);
+            offsetIndex += valuesDecoderContext.getValueCount();
             i++;
         }
 
-        Collections.reverse(valuesDecoderInfos);
-        for (ValuesDecoderInfo valuesDecoderInfo : valuesDecoderInfos) {
-            int destinationIndex = valuesDecoderInfo.getEnd() - 1;
-            int sourceIndex = valuesDecoderInfo.getStart() + valuesDecoderInfo.getNonNullCount() - 1;
+        Collections.reverse(valuesDecoderContexts);
+        for (ValuesDecoderContext valuesDecoderContext : valuesDecoderContexts) {
+            int destinationIndex = valuesDecoderContext.getEnd() - 1;
+            int sourceIndex = valuesDecoderContext.getStart() + valuesDecoderContext.getNonNullCount() - 1;
 
             offsets[destinationIndex + 1] = offsets[sourceIndex + 1];
-            while (destinationIndex >= valuesDecoderInfo.getStart()) {
-                if (!isNull[destinationIndex]) {
-                    offsets[destinationIndex] = offsets[sourceIndex];
-                    sourceIndex--;
+            while (destinationIndex >= valuesDecoderContext.getStart()) {
+                if (isNull[destinationIndex]) {
+                    offsets[destinationIndex] = offsets[sourceIndex + 1];
                 }
                 else {
-                    offsets[destinationIndex] = offsets[sourceIndex + 1];
+                    offsets[destinationIndex] = offsets[sourceIndex];
+                    sourceIndex--;
                 }
                 destinationIndex--;
             }
@@ -222,8 +217,8 @@ public class BinaryFlatBatchReader
             throws IOException
     {
         boolean[] isNull = new boolean[nextBatchSize];
-        List<ReadChunk> readChunkList = new ArrayList<>();
-        List<ValuesDecoderInfo> valuesDecoderInfos = new ArrayList<>();
+        List<ValueBuffer> valueBuffers = new ArrayList<>();
+        List<ValuesDecoderContext> valuesDecoderContexts = new ArrayList<>();
         int bufferSize = 0;
 
         int remainingInBatch = nextBatchSize;
@@ -237,14 +232,14 @@ public class BinaryFlatBatchReader
 
             int readChunkSize = Math.min(remainingCountInPage, remainingInBatch);
 
-            ReadChunk readChunk = valuesDecoder.readNext(readChunkSize);
-            bufferSize += readChunk.getBufferSize();
-            readChunkList.add(readChunk);
+            ValueBuffer valueBuffer = valuesDecoder.readNext(readChunkSize);
+            bufferSize += valueBuffer.getBufferSize();
+            valueBuffers.add(valueBuffer);
 
-            ValuesDecoderInfo<BinaryValuesDecoder> valuesDecoderInfo = new ValuesDecoderInfo(valuesDecoder, startOffset, startOffset + readChunkSize);
-            valuesDecoderInfo.setValueCount(readChunkSize);
-            valuesDecoderInfo.setNonNullCount(readChunkSize);
-            valuesDecoderInfos.add(valuesDecoderInfo);
+            ValuesDecoderContext<BinaryValuesDecoder> valuesDecoderContext = new ValuesDecoderContext(valuesDecoder, startOffset, startOffset + readChunkSize);
+            valuesDecoderContext.setValueCount(readChunkSize);
+            valuesDecoderContext.setNonNullCount(readChunkSize);
+            valuesDecoderContexts.add(valuesDecoderContext);
 
             startOffset += readChunkSize;
             remainingInBatch -= readChunkSize;
@@ -257,11 +252,11 @@ public class BinaryFlatBatchReader
         int i = 0;
         int bufferIndex = 0;
         int offsetIndex = 0;
-        for (ValuesDecoderInfo<BinaryValuesDecoder> valuesDecoderInfo : valuesDecoderInfos) {
-            BinaryValuesDecoder binaryValuesDecoder = valuesDecoderInfo.getValuesDecoder();
-            ReadChunk readChunk = readChunkList.get(i);
-            bufferIndex = binaryValuesDecoder.readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, readChunk);
-            offsetIndex += valuesDecoderInfo.getValueCount();
+        for (ValuesDecoderContext<BinaryValuesDecoder> valuesDecoderContext : valuesDecoderContexts) {
+            BinaryValuesDecoder binaryValuesDecoder = valuesDecoderContext.getValuesDecoder();
+            ValueBuffer value = valueBuffers.get(i);
+            bufferIndex = binaryValuesDecoder.readIntoBuffer(byteBuffer, bufferIndex, offsets, offsetIndex, value);
+            offsetIndex += valuesDecoderContext.getValueCount();
             i++;
         }
 
@@ -270,42 +265,33 @@ public class BinaryFlatBatchReader
         return new ColumnChunk(block, new int[0], new int[0]);
     }
 
-    private void skip(int skipSize)
+    private void seek()
             throws IOException
     {
-        if (columnDescriptor.isRequired()) {
-            int remainingInBatch = skipSize;
-            while (remainingInBatch > 0) {
-                if (remainingCountInPage == 0) {
-                    if (!readNextPage()) {
-                        break;
-                    }
-                }
-
-                int readChunkSize = Math.min(remainingCountInPage, remainingInBatch);
-                valuesDecoder.skip(readChunkSize);
-                remainingInBatch -= readChunkSize;
-                remainingCountInPage -= readChunkSize;
-            }
+        if (readOffset == 0) {
+            return;
         }
-        else {
-            boolean[] isNull = new boolean[skipSize];
-            int remainingInBatch = skipSize;
-            int startOffset = 0;
-            while (remainingInBatch > 0) {
-                if (remainingCountInPage == 0) {
-                    if (!readNextPage()) {
-                        break;
-                    }
-                }
 
-                int readChunkSize = Math.min(remainingCountInPage, remainingInBatch);
-                int nonNullCount = definitionLevelDecoder.readNext(isNull, startOffset, readChunkSize);
-                valuesDecoder.skip(nonNullCount);
-                startOffset += readChunkSize;
-                remainingInBatch -= readChunkSize;
-                remainingCountInPage -= readChunkSize;
+        int remainingInBatch = readOffset;
+        int startOffset = 0;
+        while (remainingInBatch > 0) {
+            if (remainingCountInPage == 0) {
+                if (!readNextPage()) {
+                    break;
+                }
             }
+
+            int chunkSize = Math.min(remainingCountInPage, remainingInBatch);
+            int skipSize = chunkSize;
+            if (!columnDescriptor.isRequired()) {
+                boolean[] isNull = new boolean[readOffset];
+                int nonNullCount = definitionLevelDecoder.readNext(isNull, startOffset, chunkSize);
+                skipSize = nonNullCount;
+                startOffset += chunkSize;
+            }
+            valuesDecoder.skip(skipSize);
+            remainingInBatch -= chunkSize;
+            remainingCountInPage -= chunkSize;
         }
     }
 }
